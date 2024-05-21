@@ -33,8 +33,6 @@ static msg_handler kvs_handler;
 
 int kvs_request(struct conn *c) {
 
-	printf("recv %d : %s\n", c->rlength, c->rbuffer);
-
 	c->wlength = kvs_handler(c->rbuffer, c->rlength, c->wbuffer);
 
 }
@@ -112,7 +110,6 @@ int accept_cb(int fd) {
 	socklen_t len = sizeof(clientaddr);
 
 	int clientfd = accept(fd, (struct sockaddr*)&clientaddr, &len);
-	printf("accept finshed: %d, fd: %d\n", clientfd, fd);
 	if (clientfd < 0) {
 		printf("accept errno: %d --> %s\n", errno, strerror(errno));
 		return -1;
@@ -129,7 +126,7 @@ int accept_cb(int fd) {
 		memcpy(&begin, &current, sizeof(struct timeval));
 		
 
-		printf("accept finshed: %d, time_used: %d\n", clientfd, time_used);
+		//printf("accept finshed: %d, time_used: %d\n", clientfd, time_used);
 
 	}
 
@@ -142,7 +139,7 @@ int recv_cb(int fd) {
 	memset(conn_list[fd].rbuffer, 0, BUFFER_LENGTH );
 	int count = recv(fd, conn_list[fd].rbuffer, BUFFER_LENGTH, 0);
 	if (count == 0) { // disconnect
-		printf("client disconnect: %d\n", fd);
+		//printf("client disconnect: %d\n", fd);
 		close(fd);
 
 		epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL); // unfinished
@@ -262,7 +259,6 @@ int reactor_start(unsigned short port, msg_handler handler) {
 
 	//unsigned short port = 2000;
 	kvs_handler = handler;
-	printf("reactor_entry: %d\n", port);
 
 	epfd = epoll_create(1);
 
