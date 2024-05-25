@@ -498,8 +498,9 @@ int kvs_rbtree_set(kvs_rbtree_t *inst, char *key, char *value) {
 char* kvs_rbtree_get(kvs_rbtree_t *inst, char *key)  {
 
 	if (!inst || !key) return NULL;
-
 	rbtree_node *node = rbtree_search(inst, key);
+	if (!node) return NULL; // no exist
+	if (node == inst->nil) return NULL;
 
 	return node->value;
 	
@@ -524,7 +525,8 @@ int kvs_rbtree_mod(kvs_rbtree_t *inst, char *key, char *value) {
 
 	rbtree_node *node = rbtree_search(inst, key);
 	if (!node) return 1; // no exist
-
+	if (node == inst->nil) return 1;
+	
 	kvs_free(node->value);
 
 	node->value = kvs_malloc(strlen(value) + 1);
@@ -543,6 +545,7 @@ int kvs_rbtree_exist(kvs_rbtree_t *inst, char *key) {
 
 	rbtree_node *node = rbtree_search(inst, key);
 	if (!node) return 1; // no exist
+	if (node == inst->nil) return 1;
 
 	return 0;
 }

@@ -13,7 +13,9 @@ extern kvs_array_t global_array;
 extern kvs_rbtree_t global_rbtree;
 #endif
 
-
+#if ENABLE_HASH
+extern kvs_hash_t global_hash;
+#endif
 
 void *kvs_malloc(size_t size) {
 	return malloc(size);
@@ -26,7 +28,8 @@ void kvs_free(void *ptr) {
 
 const char *command[] = {
 	"SET", "GET", "DEL", "MOD", "EXIST",
-	"RSET", "RGET", "RDEL", "RMOD", "REXIST"
+	"RSET", "RGET", "RDEL", "RMOD", "REXIST",
+	"HSET", "HGET", "HDEL", "HMOD", "HEXIST"
 };
 
 enum {
@@ -43,6 +46,12 @@ enum {
 	KVS_CMD_RDEL,
 	KVS_CMD_RMOD,
 	KVS_CMD_REXIST,
+	// hash
+	KVS_CMD_HSET,
+	KVS_CMD_HGET,
+	KVS_CMD_HDEL,
+	KVS_CMD_HMOD,
+	KVS_CMD_HEXIST,
 	
 	KVS_CMD_COUNT,
 };
@@ -195,6 +204,56 @@ int kvs_filter_protocol(char **tokens, int count, char *response) {
 		}
 		break;
 #endif
+#if ENABLE_HASH
+	case KVS_CMD_HSET:
+		ret = kvs_hash_set(&global_hash ,key, value);
+		if (ret < 0) {
+			length = sprintf(response, "ERROR\r\n");
+		} else if (ret == 0) {
+			length = sprintf(response, "OK\r\n");
+		} else {
+			length = sprintf(response, "EXIST\r\n");
+		} 
+		
+		break;
+	case KVS_CMD_HGET: {
+		char *result = kvs_hash_get(&global_hash, key);
+		if (result == NULL) {
+			length = sprintf(response, "NO EXIST\r\n");
+		} else {
+			length = sprintf(response, "%s\r\n", result);
+		}
+		break;
+	}
+	case KVS_CMD_HDEL:
+		ret = kvs_hash_del(&global_hash ,key);
+		if (ret < 0) {
+			length = sprintf(response, "ERROR\r\n");
+ 		} else if (ret == 0) {
+			length = sprintf(response, "OK\r\n");
+		} else {
+			length = sprintf(response, "NO EXIST\r\n");
+		}
+		break;
+	case KVS_CMD_HMOD:
+		ret = kvs_hash_mod(&global_hash ,key, value);
+		if (ret < 0) {
+			length = sprintf(response, "ERROR\r\n");
+ 		} else if (ret == 0) {
+			length = sprintf(response, "OK\r\n");
+		} else {
+			length = sprintf(response, "NO EXIST\r\n");
+		}
+		break;
+	case KVS_CMD_HEXIST:
+		ret = kvs_hash_exist(&global_hash ,key);
+		if (ret == 0) {
+			length = sprintf(response, "EXIST\r\n");
+		} else {
+			length = sprintf(response, "NO EXIST\r\n");
+		}
+		break;
+#endif
 
 	default: 
 		assert(0);
@@ -243,6 +302,11 @@ int init_kvengine(void) {
 	kvs_rbtree_create(&global_rbtree);
 #endif
 
+#if ENABLE_HASH
+	memset(&global_hash, 0, sizeof(kvs_hash_t));
+	kvs_hash_create(&global_hash);
+#endif
+
 	return 0;
 }
 
@@ -252,6 +316,9 @@ void dest_kvengine(void) {
 #endif
 #if ENABLE_RBTREE
 	kvs_rbtree_destory(&global_rbtree);
+#endif
+#if ENABLE_HASH
+	kvs_hash_destory(&global_hash);
 #endif
 
 }
