@@ -25,6 +25,42 @@ extern kvs_rbtree_t global_rbtree;
 extern kvs_hash_t global_hash;
 #endif
 
+// 根据优先级选择使用的数据结构：红黑树 > 哈希 > 数组
+// 以下是当前使用的数据结构的统一接口定义
+#if ENABLE_RBTREE
+  #define KVS_ENGINE_RBTREE
+  extern kvs_rbtree_t global_main_engine;
+  #define kvs_main_set(inst, key, value) kvs_rbtree_set(inst, key, value)
+  #define kvs_main_get(inst, key) kvs_rbtree_get(inst, key)
+  #define kvs_main_del(inst, key) kvs_rbtree_del(inst, key)
+  #define kvs_main_mod(inst, key, value) kvs_rbtree_mod(inst, key, value)
+  #define kvs_main_exist(inst, key) kvs_rbtree_exist(inst, key)
+  #define kvs_main_create(inst) kvs_rbtree_create(inst)
+  #define kvs_main_destroy(inst) kvs_rbtree_destroy(inst)
+#elif ENABLE_HASH
+  #define KVS_ENGINE_HASH
+  extern kvs_hash_t global_main_engine;
+  #define kvs_main_set(inst, key, value) kvs_hash_set(inst, key, value)
+  #define kvs_main_get(inst, key) kvs_hash_get(inst, key)
+  #define kvs_main_del(inst, key) kvs_hash_del(inst, key)
+  #define kvs_main_mod(inst, key, value) kvs_hash_mod(inst, key, value)
+  #define kvs_main_exist(inst, key) kvs_hash_exist(inst, key)
+  #define kvs_main_create(inst) kvs_hash_create(inst)
+  #define kvs_main_destroy(inst) kvs_hash_destroy(inst)
+#elif ENABLE_ARRAY
+  #define KVS_ENGINE_ARRAY
+  extern kvs_array_t global_main_engine;
+  #define kvs_main_set(inst, key, value) kvs_array_set(inst, key, value)
+  #define kvs_main_get(inst, key) kvs_array_get(inst, key)
+  #define kvs_main_del(inst, key) kvs_array_del(inst, key)
+  #define kvs_main_mod(inst, key, value) kvs_array_mod(inst, key, value)
+  #define kvs_main_exist(inst, key) kvs_array_exist(inst, key)
+  #define kvs_main_create(inst) kvs_array_create(inst)
+  #define kvs_main_destroy(inst) kvs_array_destroy(inst)
+#else
+  #error "至少需要启用一种数据结构"
+#endif
+
 
 
 /**
@@ -107,83 +143,84 @@ int ksfWriteOneKv(int fd, const char *k, size_t klen, const char *v, size_t vlen
     return 0;
 }
 
-/**
- * 遍历数组结构，将所有KV对写入KSF文件
- * @param fd 文件描述符
- * @return 成功返回0，失败返回-1
- */
-#if ENABLE_ARRAY
-int ksfWriteArray(int fd) {
-    for (int i = 0; i < global_array.total; i++) {
-        kvs_array_item_t *item = &global_array.table[i];
-        if (item->key != NULL) {  // 只写入非空项
-            if (ksfWriteOneKv(fd, item->key, strlen(item->key), item->value, strlen(item->value)) != 0) {
-                return -1;
-            }
-        }
-    }
-    return 0;
-}
-#endif
 
+
+#if ENABLE_RBTREE
 /**
  * 遍历红黑树结构，将所有KV对写入KSF文件
  * @param fd 文件描述符
  * @param node 当前节点
  * @return 成功返回0，失败返回-1
  */
-#if ENABLE_RBTREE
 int ksfWriteRbtreeRecurse(int fd, rbtree_node *node) {
     if (node == NULL || node->key == NULL) {
-        return 0;
+      return 0;
     }
 
     // 递归写入左子树
     if (ksfWriteRbtreeRecurse(fd, node->left) != 0) {
-        return -1;
+      return -1;
     }
-
+    
     // 写入当前节点
     if (node->key != NULL && node->value != NULL) {
-        if (ksfWriteOneKv(fd, node->key, strlen(node->key), (char*)node->value, strlen((char*)node->value)) != 0) {
-            return -1;
-        }
+      if (ksfWriteOneKv(fd, node->key, strlen(node->key), (char*)node->value, strlen((char*)node->value)) != 0) {
+        return -1;
+      }
     }
-
+    
     // 递归写入右子树
     if (ksfWriteRbtreeRecurse(fd, node->right) != 0) {
-        return -1;
+      return -1;
     }
-
+    
     return 0;
-}
+  }
+  
+  int ksfWriteRbtree(int fd) {
+    return ksfWriteRbtreeRecurse(fd, global_main_engine.root);
+  }
+  
+  #elif ENABLE_HASH
+  /**
+   * 遍历哈希表结构，将所有KV对写入KSF文件
+   * @param fd 文件描述符
+   * @return 成功返回0，失败返回-1
+   */
+  int ksfWriteHash(int fd) {
+      hashtable_t *hash = &global_main_engine;  // 注意：这里使用global_main_engine
+      for (int i = 0; i < hash->max_slots; i++) {
+          hashnode_t *node = hash->nodes[i];
+          while (node != NULL) {
+              if (node->key != NULL) {
+                  if (ksfWriteOneKv(fd, node->key, strlen(node->key), node->value, strlen(node->value)) != 0) {
+                      return -1;
+                  }
+              }
+              node = node->next;
+          }
+      }
+      return 0;
+  }
+  #elif ENABLE_ARRAY
+  /**
+   * 遍历数组结构，将所有KV对写入KSF文件
+   * @param fd 文件描述符
+   * @return 成功返回0，失败返回-1
+   */
+  int ksfWriteArray(int fd) {
+      for (int i = 0; i < global_main_engine.total; i++) {
+          kvs_array_item_t *item = &global_main_engine.table[i];
+          if (item->key != NULL) {  // 只写入非空项
+              if (ksfWriteOneKv(fd, item->key, strlen(item->key), item->value, strlen(item->value)) != 0) {
+                  return -1;
+              }
+          }
+      }
+      return 0;
+  }
 
-int ksfWriteRbtree(int fd) {
-    return ksfWriteRbtreeRecurse(fd, global_rbtree.root);
-}
-#endif
 
-/**
- * 遍历哈希表结构，将所有KV对写入KSF文件
- * @param fd 文件描述符
- * @return 成功返回0，失败返回-1
- */
-#if ENABLE_HASH
-int ksfWriteHash(int fd) {
-    hashtable_t *hash = &global_hash;
-    for (int i = 0; i < hash->max_slots; i++) {
-        hashnode_t *node = hash->nodes[i];
-        while (node != NULL) {
-            if (node->key != NULL) {
-                if (ksfWriteOneKv(fd, node->key, strlen(node->key), node->value, strlen(node->value)) != 0) {
-                    return -1;
-                }
-            }
-            node = node->next;
-        }
-    }
-    return 0;
-}
 #endif
 
 /**
@@ -201,25 +238,25 @@ int ksfSave(const char *filename) {
         return -1;
     }
 
+    // 只需要对主引擎进行数据保存
     int result = 0;
 
-#if ENABLE_ARRAY
-    if (ksfWriteArray(fd) != 0) {
-        result = -1;
-    }
-#endif
-
-#if ENABLE_RBTREE
-    if (ksfWriteRbtree(fd) != 0) {
-        result = -1;
-    }
-#endif
-
-#if ENABLE_HASH
-    if (ksfWriteHash(fd) != 0) {
-        result = -1;
-    }
-#endif
+    // 通过遍历主引擎中的所有键值对来保存数据
+    // 由于我们无法直接遍历所有三种数据结构的通用接口，
+    // 我们仍需要根据启用的类型来调用对应的写入函数
+    #if ENABLE_RBTREE
+        if (ksfWriteRbtree(fd) != 0) {
+            result = -1;
+        }
+    #elif ENABLE_HASH
+        if (ksfWriteHash(fd) != 0) {
+            result = -1;
+        }
+    #elif ENABLE_ARRAY
+        if (ksfWriteArray(fd) != 0) {
+            result = -1;
+        }
+    #endif
 
     // 确保数据写入磁盘
     fsync(fd);
@@ -274,90 +311,104 @@ int ksfSaveBackground() {
  * @return 成功返回0，失败返回-1
  */
 int ksfLoad(const char *filename) {
-    int fd = open(filename, O_RDONLY);
-    if (fd == -1) {
-        fprintf(stderr, "错误：无法打开KSF文件 %s\n", filename);
+    printf("开始加载KSF快照文件: %s\n", filename);
+
+    // 检查文件是否存在
+    FILE* file = fopen(filename, "rb");
+    if (!file) {
+        printf("KSF快照文件不存在或无法打开: %s\n", filename);
+        return 0; // 文件不存在是正常的，返回成功
+    }
+
+    // 获取文件大小
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    if (file_size == 0) {
+        printf("KSF快照文件为空: %s\n", filename);
+        fclose(file);
+        return 0;
+    }
+
+    // 分配缓冲区读取整个文件
+    char* buffer = (char*)malloc(file_size);
+    if (!buffer) {
+        fprintf(stderr, "无法分配内存来加载KSF快照文件\n");
+        fclose(file);
         return -1;
     }
 
-    uint8_t buffer[16];
-    uint64_t klen, vlen;
-    char *key = NULL, *value = NULL;
-    int result = 0;
+    // 读取文件内容
+    size_t bytes_read = fread(buffer, 1, file_size, file);
+    if (bytes_read != file_size) {
+        fprintf(stderr, "读取KSF快照文件时发生错误\n");
+        kvs_free(buffer);
+        fclose(file);
+        return -1;
+    }
 
-    while (1) {
-        // 读取键长度
-        ssize_t bytes_read = read(fd, buffer, sizeof(buffer));
-        if (bytes_read <= 0) {
-            break; // 文件结束或出错
-        }
+    fclose(file);
 
-        int offset = 0;
-        int klen_bytes = decode_vlq(buffer, &klen);
-        offset += klen_bytes;
+    // 解析KSF内容并恢复数据
+    long pos = 0;
+    while (pos < file_size) {
+        // 解码键长度（VLQ格式）
+        if (pos >= file_size) break;
+        uint64_t key_len;
+        int key_len_bytes = decode_vlq((const uint8_t*)(buffer + pos), &key_len);
+        pos += key_len_bytes;
 
-        // 读取值长度
-        int vlen_bytes = decode_vlq(buffer + klen_bytes, &vlen);
-        offset += vlen_bytes;
-
-        // 为键和值分配内存
-        key = malloc(klen + 1);
-        value = malloc(vlen + 1);
-        if (key == NULL || value == NULL) {
-            fprintf(stderr, "错误：内存分配失败\n");
-            result = -1;
-            break;
-        }
+        // 解码值长度（VLQ格式）
+        if (pos >= file_size) break;
+        uint64_t val_len;
+        int val_len_bytes = decode_vlq((const uint8_t*)(buffer + pos), &val_len);
+        pos += val_len_bytes;
 
         // 读取键内容
-        if (read(fd, key, klen) != (ssize_t)klen) {
-            fprintf(stderr, "错误：读取键数据失败\n");
-            result = -1;
-            break;
+        if (pos + key_len > file_size) break;
+        char* key = NULL;
+        if (key_len > 0) {
+            key = (char*)malloc(key_len + 1);
+            if (!key) {
+                fprintf(stderr, "无法分配内存来存储键\n");
+                kvs_free(buffer);
+                return -1;
+            }
+            memcpy(key, buffer + pos, key_len);
+            key[key_len] = '\0';
+            pos += key_len;
         }
-        key[klen] = '\0';
 
         // 读取值内容
-        if (read(fd, value, vlen) != (ssize_t)vlen) {
-            fprintf(stderr, "错误：读取值数据失败\n");
-            result = -1;
-            break;
+        char* value = NULL;
+        if (val_len > 0) {
+            if (pos + val_len > file_size) {
+                if (key) kvs_free(key);
+                kvs_free(buffer);
+                return -1;
+            }
+            value = (char*)malloc(val_len + 1);
+            if (!value) {
+                fprintf(stderr, "无法分配内存来存储值\n");
+                if (key) kvs_free(key);
+                kvs_free(buffer);
+                return -1;
+            }
+            memcpy(value, buffer + pos, val_len);
+            value[val_len] = '\0';
+            pos += val_len;
         }
-        value[vlen] = '\0';
 
-        // 根据当前使用的数据结构插入数据
-        // 这里使用数组实现为例，你可以根据实际使用的结构适配
-#if ENABLE_ARRAY
-        kvs_array_set(&global_array, key, value);
-#endif
+        // 执行SET操作将KV对加载到主存储引擎中
+        kvs_main_set(&global_main_engine, key, value);
 
-#if ENABLE_RBTREE
-        kvs_rbtree_set(&global_rbtree, key, value);
-#endif
-
-#if ENABLE_HASH
-        kvs_hash_set(&global_hash, key, value);
-#endif
-
-        // 释放内存
-        free(key);
-        free(value);
-        key = NULL;
-        value = NULL;
+        // 释放分配的内存
+        if (key) kvs_free(key);
+        if (value) kvs_free(value);
     }
 
-    if (key) free(key);
-    if (value) free(value);
-
-    close(fd);
-
-    if (result == 0) {
-        printf("KSF数据加载成功: %s\n", filename);
-    } else {
-        fprintf(stderr, "错误：加载KSF数据失败\n");
-    }
-
-    return result;
+    kvs_free(buffer);
+    printf("KSF快照文件加载完成: %s\n", filename);
+    return 0;
 }
-
-

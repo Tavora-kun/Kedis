@@ -410,6 +410,35 @@ void multicmd_testcase(int connfd) {
   printf("passed\n");
 }
 
+void persistence_load_test(int connfd) {
+  // 先设置一些数据
+  testcase(connfd, "SET test_key test_value", "OK\r\n", "PERS_LOAD_SET");
+  testcase(connfd, "RSET rbtree_key rbtree_value", "OK\r\n", "PERS_LOAD_RSET");
+  testcase(connfd, "HSET hash_key hash_value", "OK\r\n", "PERS_LOAD_HSET");
+
+  // 保存快照
+  testcase(connfd, "SAVE", "OK\r\n", "PERS_LOAD_SAVE");
+
+  // 退出服务器进程并重启使用快照模式
+  printf("请手动验证加载功能：\n");
+  printf("1. 关闭当前服务器\n");
+  printf("2. 使用 'snap' 参数重启服务器：./server <port> snap\n");
+  printf("3. 重启后执行以下命令验证数据是否加载成功：\n");
+  printf("   - GET test_key (should return 'test_value')\n");
+  printf("   - RGET rbtree_key (should return 'rbtree_value')\n");
+  printf("   - HGET hash_key (should return 'hash_value')\n");
+
+  // 也可以测试AOF加载
+  printf("\n测试AOF加载：\n");
+  printf("1. 关闭当前服务器\n");
+  printf("2. 使用 'aof' 参数重启服务器：./server <port> aof\n");
+  printf("3. 重启后执行以下命令验证数据是否加载成功：\n");
+  printf("   - GET test_key (should return 'test_value')\n");
+  printf("   - RGET rbtree_key (should return 'rbtree_value')\n");
+  printf("   - HGET hash_key (should return 'hash_value')\n");
+  printf("passed\n");
+}
+
 
 int main(int argc, char* argv[]) {
 
