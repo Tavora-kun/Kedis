@@ -245,24 +245,6 @@ int kvs_hash_del(kvs_hash_t *hash, char *key) {
 	return 0;
 }
 
-
-// 遍历哈希表并保存到文件
-void kvs_hash_save_snapshot(kvs_hash_t *hash, FILE *file) {
-    if (!hash || !file || !hash->nodes) {
-        return;
-    }
-
-    for (int i = 0; i < hash->max_slots; i++) {
-        hashnode_t *current = hash->nodes[i];
-        while (current != NULL) {
-            if (current->key && current->value) {
-                fprintf(file, "HSET %s %s\n", current->key, current->value);
-            }
-            current = current->next;
-        }
-    }
-}
-
 int kvs_hash_exist(kvs_hash_t *hash, char *key) {
 
 	char *value = kvs_hash_get(hash, key);

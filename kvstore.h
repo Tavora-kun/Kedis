@@ -40,6 +40,9 @@
 #define AOF_CMD_MOD 2
 #define AOF_CMD_DEL 3
 
+#define INIT_LOAD_AOF 0
+#define INIT_LOAD_SNAP 1
+
 typedef int (*msg_handler)(char *msg, int length, char *response);
 
 
@@ -116,8 +119,6 @@ char* kvs_rbtree_get(kvs_rbtree_t *inst, char *key);
 int kvs_rbtree_del(kvs_rbtree_t *inst, char *key);
 int kvs_rbtree_mod(kvs_rbtree_t *inst, char *key, char *value);
 int kvs_rbtree_exist(kvs_rbtree_t *inst, char *key);
-void kvs_rbtree_save_snapshot(rbtree *T, FILE *file);
-// kvs_hash_save_snapshot的声明将在ENABLE_HASH块中定义
 
 
 
@@ -165,7 +166,6 @@ char* kvs_hash_get(kvs_hash_t *hash, char *key);
 int kvs_hash_mod(kvs_hash_t *hash, char *key, char *value);
 int kvs_hash_del(kvs_hash_t *hash, char *key);
 int kvs_hash_exist(kvs_hash_t *hash, char *key);
-void kvs_hash_save_snapshot(kvs_hash_t *hash, FILE *file);
 
 
 #endif
@@ -194,6 +194,7 @@ void appendToAofBuffer(int type, const char* key, const char* value);  // 添加
 int flushAofBuffer(void);  // 刷新AOF缓冲区
 int start_aof_fsync_process(void);  // 启动AOF同步线程
 void before_sleep(void);  // 事件循环前的处理函数
+int aofLoad(const char* filename);
 
 #endif
 

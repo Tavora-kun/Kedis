@@ -20,24 +20,12 @@
 
 enum {
   KVS_CMD_START = 0,
-  // array
+  // 统一的KV操作命令
   KVS_CMD_SET = KVS_CMD_START,
   KVS_CMD_GET,
   KVS_CMD_DEL,
   KVS_CMD_MOD,
   KVS_CMD_EXIST,
-  // rbtree
-  KVS_CMD_RSET,
-  KVS_CMD_RGET,
-  KVS_CMD_RDEL,
-  KVS_CMD_RMOD,
-  KVS_CMD_REXIST,
-  // hash
-  KVS_CMD_HSET,
-  KVS_CMD_HGET,
-  KVS_CMD_HDEL,
-  KVS_CMD_HMOD,
-  KVS_CMD_HEXIST,
 
   KVS_CMD_SAVE,
   KVS_CMD_BGSAVE,
@@ -48,23 +36,47 @@ enum {
 #define ECHO_LOGIC 0
 #define KV_LOGIC 1
 
-#include "kvstore.h"
-
-#if ENABLE_ARRAY
-extern kvs_array_t global_array;
-#endif
-
+// 根据优先级选择使用的数据结构：红黑树 > 哈希 > 数组
+// 以下是当前使用的数据结构的统一接口定义
 #if ENABLE_RBTREE
-extern kvs_rbtree_t global_rbtree;
-#endif
-
-#if ENABLE_HASH
-extern kvs_hash_t global_hash;
+  #define KVS_ENGINE_RBTREE
+  kvs_rbtree_t global_main_engine;
+  #define kvs_main_set(inst, key, value) kvs_rbtree_set(inst, key, value)
+  #define kvs_main_get(inst, key) kvs_rbtree_get(inst, key)
+  #define kvs_main_del(inst, key) kvs_rbtree_del(inst, key)
+  #define kvs_main_mod(inst, key, value) kvs_rbtree_mod(inst, key, value)
+  #define kvs_main_exist(inst, key) kvs_rbtree_exist(inst, key)
+  #define kvs_main_create(inst) kvs_rbtree_create(inst)
+  #define kvs_main_destroy(inst) kvs_rbtree_destroy(inst)
+#elif ENABLE_HASH
+  #define KVS_ENGINE_HASH
+  kvs_hash_t global_main_engine;
+  #define kvs_main_set(inst, key, value) kvs_hash_set(inst, key, value)
+  #define kvs_main_get(inst, key) kvs_hash_get(inst, key)
+  #define kvs_main_del(inst, key) kvs_hash_del(inst, key)
+  #define kvs_main_mod(inst, key, value) kvs_hash_mod(inst, key, value)
+  #define kvs_main_exist(inst, key) kvs_hash_exist(inst, key)
+  #define kvs_main_create(inst) kvs_hash_create(inst)
+  #define kvs_main_destroy(inst) kvs_hash_destroy(inst)
+#elif ENABLE_ARRAY
+  #define KVS_ENGINE_ARRAY
+  kvs_array_t global_main_engine;
+  #define kvs_main_set(inst, key, value) kvs_array_set(inst, key, value)
+  #define kvs_main_get(inst, key) kvs_array_get(inst, key)
+  #define kvs_main_del(inst, key) kvs_array_del(inst, key)
+  #define kvs_main_mod(inst, key, value) kvs_array_mod(inst, key, value)
+  #define kvs_main_exist(inst, key) kvs_array_exist(inst, key)
+  #define kvs_main_create(inst) kvs_array_create(inst)
+  #define kvs_main_destroy(inst) kvs_array_destroy(inst)
+#else
+  #error "至少需要启用一种数据结构"
 #endif
 
 // AOF缓冲区和长度
 char aof_buf[AOF_BUF_SIZE] = {0};
 int aof_len = 0;
+extern const char* aof_filename;
+const char* snap_filename = "dump.ksf";
 
 // 不直接使用系统调用(第三方接口)
 // 跨平台的时候，只需要修改这个函数即可--> 可迭代
@@ -80,13 +92,15 @@ const char* command[] = {"SET",  "GET",  "DEL",  "MOD",  "EXIST",
                          "SAVE", "BGSAVE"};  // 添加SAVE和BGSAVE命令
 
 // 全局变量存储持久化模式和自动保存参数
-// static int g_persist_mode = PERSIST_MODE_INCREMENTAL;
+static int load_mode = INIT_LOAD_SNAP;
 
 // 自动保存参数：save seconds changes
 static int save_params_seconds = 300;      // 5分钟
 static int save_params_changes = 100;      // 100次变化
 static time_t last_save_time = 0;          // 上次保存时间
 static int changes_since_last_save = 0;    // 自上次保存以来的变化次数
+
+
 
 /*
  * 解析单条命令的token
@@ -205,9 +219,8 @@ int kvs_filter_protocol(char** tokens, int count, char* response) {
   char* value = tokens[2];
 
   switch (cmd) {
-#if ENABLE_ARRAY
     case KVS_CMD_SET:  // --> OK
-      ret = kvs_array_set(&global_array, key, value);
+      ret = kvs_main_set(&global_main_engine, key, value);
 
       if (ret < 0) {
         length = sprintf(response, "ERROR\r\n");
@@ -220,7 +233,7 @@ int kvs_filter_protocol(char** tokens, int count, char* response) {
       }
       break;
     case KVS_CMD_GET:  // --> Value
-      char* gotValue = kvs_array_get(&global_array, key);
+      char* gotValue = kvs_main_get(&global_main_engine, key);
       if (gotValue == NULL) {
         length = sprintf(response, "ERROR / Not Exist\r\n");
       } else {
@@ -228,7 +241,7 @@ int kvs_filter_protocol(char** tokens, int count, char* response) {
       }
       break;
     case KVS_CMD_DEL:  // -> OK
-      ret = kvs_array_del(&global_array, key);
+      ret = kvs_main_del(&global_main_engine, key);
       if (ret < 0) {
         length = sprintf(response, "ERROR\r\n");
       } else if (ret == 0) {
@@ -240,7 +253,7 @@ int kvs_filter_protocol(char** tokens, int count, char* response) {
       }
       break;
     case KVS_CMD_MOD:  // -> OK
-      ret = kvs_array_mod(&global_array, key, value);
+      ret = kvs_main_mod(&global_main_engine, key, value);
       if (ret < 0) {
         length = sprintf(response, "ERROR\r\n");
       } else if (ret == 0) {
@@ -252,7 +265,7 @@ int kvs_filter_protocol(char** tokens, int count, char* response) {
       }
       break;
     case KVS_CMD_EXIST:  // -> Yes / No
-      ret = kvs_array_exist(&global_array, key);
+      ret = kvs_main_exist(&global_main_engine, key);
       if (ret > 0) {
         length = sprintf(response, "YES, Exist\r\n");
       } else if (ret == 0) {
@@ -261,121 +274,11 @@ int kvs_filter_protocol(char** tokens, int count, char* response) {
         length = sprintf(response, "ERROR\r\n");
       }
       break;
-#endif
-      // rbtree
-      #if ENABLE_RBTREE
-      case KVS_CMD_RSET:  // --> OK
-        ret = kvs_rbtree_set(&global_rbtree , key, value);
-        if (ret < 0) {
-          length = sprintf(response, "ERROR\r\n");
-        } else if (ret == 0) {
-          appendToAofBuffer(AOF_CMD_SET, key, value); // CMD_SET = 1
-          length = sprintf(response, "OK\r\n");
-        } else {
-          length = sprintf(response, "Key has existed\r\n");
-        }
-        break;
-        case KVS_CMD_RGET:  // --> Value
-        char* rgotValue = kvs_rbtree_get(&global_rbtree , key);
-        if (rgotValue == NULL) {
-          length = sprintf(response, "ERROR / Not Exist\r\n");
-        } else {
-          length = sprintf(response, "%s\r\n", rgotValue);
-        }
-        break;
-        case KVS_CMD_RDEL:  // -> OK
-        ret = kvs_rbtree_del(&global_rbtree , key);
-        if (ret < 0) {
-          length = sprintf(response, "ERROR\r\n");
-        } else if (ret == 0) {
-          appendToAofBuffer(AOF_CMD_DEL, key, NULL); // CMD_DEL = 3
-          length = sprintf(response, "OK\r\n");
-        } else {
-          length = sprintf(response, "Not Exist\r\n");
-        }
-        break;
-        case KVS_CMD_RMOD:  // -> OK
-        ret = kvs_rbtree_mod(&global_rbtree , key, value);
-        if (ret < 0) {
-          length = sprintf(response, "ERROR\r\n");
-        } else if (ret == 0) {
-          appendToAofBuffer(AOF_CMD_MOD, key, value); // CMD_MOD = 2
-          length = sprintf(response, "OK\r\n");
-        } else {
-          length = sprintf(response, "Not Exist\r\n");
-        }
-        break;
-      case KVS_CMD_REXIST:  // -> Yes / No
-        ret = kvs_rbtree_exist(&global_rbtree , key);
-        if (ret > 0) {
-          length = sprintf(response, "YES, Exist\r\n");
-        } else if (ret == 0) {
-          length = sprintf(response, "NO, Not Exist\r\n");
-        } else {
-          length = sprintf(response, "ERROR\r\n");
-        }
-        break;
-        #endif
-    // hash
-    #if ENABLE_HASH
-    case KVS_CMD_HSET:  // --> OK
-      ret = kvs_hash_set(&global_hash , key, value);
-      if (ret < 0) {
-        length = sprintf(response, "ERROR\r\n");
-      } else if (ret == 0) {
-        appendToAofBuffer(AOF_CMD_SET, key, value); // CMD_SET = 1
-        length = sprintf(response, "OK\r\n");
-      } else {
-        length = sprintf(response, "Key has existed\r\n");
-      }
-      break;
-      case KVS_CMD_HGET:  // --> Value
-      char* hgotValue = kvs_hash_get(&global_hash , key);
-      if (hgotValue == NULL) {
-        length = sprintf(response, "ERROR / Not Exist\r\n");
-      } else {
-        length = sprintf(response, "%s\r\n", hgotValue);
-      }
-      break;
-      case KVS_CMD_HDEL:  // -> OK
-      ret = kvs_hash_del(&global_hash , key);
-      if (ret < 0) {
-        length = sprintf(response, "ERROR\r\n");
-      } else if (ret == 0) {
-        appendToAofBuffer(AOF_CMD_DEL, key, NULL); // CMD_DEL = 3
-        length = sprintf(response, "OK\r\n");
-      } else {
-        length = sprintf(response, "Not Exist\r\n");
-      }
-      break;
-      case KVS_CMD_HMOD:  // -> OK
-      ret = kvs_hash_mod(&global_hash, key, value);
-      if (ret < 0) {
-        length = sprintf(response, "ERROR\r\n");
-      } else if (ret == 0) {
-        appendToAofBuffer(AOF_CMD_MOD, key, value); // CMD_MOD = 2
-        length = sprintf(response, "OK\r\n");
-      } else {
-        length = sprintf(response, "Not Exist\r\n");
-      }
-      break;
-    case KVS_CMD_HEXIST:  // -> Yes / No
-      ret = kvs_hash_exist(&global_hash , key);
-      if (ret > 0) {
-        length = sprintf(response, "YES, Exist\r\n");
-      } else if (ret == 0) {
-        length = sprintf(response, "NO, Not Exist\r\n");
-      } else {
-        length = sprintf(response, "ERROR\r\n");
-      }
-      break;
-
-#endif
 
     // 添加SAVE和BGSAVE命令处理
     case KVS_CMD_SAVE:
         // 同步保存快照
-        ksfSave("dump.ksf");
+        ksfSave(snap_filename);
         length = sprintf(response, "OK\r\n");
         break;
     case KVS_CMD_BGSAVE:
@@ -383,7 +286,6 @@ int kvs_filter_protocol(char** tokens, int count, char* response) {
         ksfSaveBackground();
         length = sprintf(response, "Background saving started\r\n");
         break;
-
     default:
       assert(0);
   }
@@ -618,20 +520,9 @@ int init_kvengine(void) {
   // // 首先初始化持久化功能
   // kvs_persist_init(g_persist_mode);
 
-#if ENABLE_ARRAY
-  memset(&global_array, 0, sizeof(kvs_array_t));
-  kvs_array_create(&global_array);
-#endif
-
-#if ENABLE_RBTREE
-  memset(&global_rbtree, 0, sizeof(kvs_rbtree_t));
-  kvs_rbtree_create(&global_rbtree);
-#endif
-
-#if ENABLE_HASH
-  memset(&global_hash, 0, sizeof(kvs_hash_t));
-  kvs_hash_create(&global_hash);
-#endif
+  // 只初始化主引擎（根据优先级选择的数据结构）
+  memset(&global_main_engine, 0, sizeof(global_main_engine));
+  kvs_main_create(&global_main_engine);
 
   // 在数据结构初始化完成之后，根据模式加载数据
   // if (g_persist_mode == PERSIST_MODE_INCREMENTAL) {
@@ -652,15 +543,8 @@ void dest_kvengine(void) {
   // 在程序退出前保存快照
   ksfSave("dump.ksf");
 
-#if ENABLE_ARRAY
-  kvs_array_destroy(&global_array);
-#endif
-#if ENABLE_RBTREE
-  kvs_rbtree_destroy(&global_rbtree);
-#endif
-#if ENABLE_HASH
-  kvs_hash_destroy(&global_hash);
-#endif
+  // 销毁主引擎
+  kvs_main_destroy(&global_main_engine);
 
   // // 关闭持久化功能
   // kvs_persist_close();
@@ -679,21 +563,18 @@ int main(int argc, char* argv[]) {
 
   int port = atoi(argv[1]);
 
-  // // 解析持久化模式参数
-  // if (argc == 3) {
-  //   if (strcmp(argv[2], "log") == 0) {
-  //     g_persist_mode = PERSIST_MODE_INCREMENTAL;
-  //   } else if (strcmp(argv[2], "snap") == 0) {
-  //     g_persist_mode = PERSIST_MODE_SNAPSHOT;
-  //   } else {
-  //     printf("错误：未知的持久化模式 '%s'\n", argv[2]);
-  //     printf("用法: %s <port> [log|snap]\n", argv[0]);
-  //     return -1;
-  //   }
-  // } else {
-  //   // 默认使用增量模式
-  //   g_persist_mode = PERSIST_MODE_INCREMENTAL;
-  // }
+  // 解析持久化模式参数
+  if (argc == 3) {
+    if (strcmp(argv[2], "aof") == 0) {
+      load_mode = INIT_LOAD_AOF;
+    } else if (strcmp(argv[2], "snap") == 0) {
+      load_mode = INIT_LOAD_SNAP;
+    } else {
+      printf("错误：未知的持久化模式 '%s'\n", argv[2]);
+      printf("用法: %s <port> [aof|snap]\n", argv[0]);
+      return -1;
+    }
+  }
 
   // 注册信号处理器，捕获SIGINT (Ctrl+C) 和 SIGTERM
   signal(SIGINT, signal_handler);
@@ -706,8 +587,16 @@ int main(int argc, char* argv[]) {
 
   init_kvengine();
 
+
+  if (load_mode == INIT_LOAD_AOF) {
+    aofLoad(aof_filename);
+  } else if (load_mode == INIT_LOAD_SNAP) {
+    ksfLoad(snap_filename);
+  }
   // 启动AOF同步后台线程
   start_aof_fsync_process();
+
+
 
 #if (NETWORK_SELECT == NETWORK_REACTOR)
   reactor_start(port, kvs_protocol);  //

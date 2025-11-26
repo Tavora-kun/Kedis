@@ -12,12 +12,63 @@
 #include <signal.h>
 #include <pthread.h>
 
+
+// 重新声明全局变量
+#if ENABLE_ARRAY
+extern kvs_array_t global_array;
+#endif
+
+#if ENABLE_RBTREE
+extern kvs_rbtree_t global_rbtree;
+#endif
+
+#if ENABLE_HASH
+extern kvs_hash_t global_hash;
+#endif
+
+// 根据优先级选择使用的数据结构：红黑树 > 哈希 > 数组
+// 以下是当前使用的数据结构的统一接口定义
+#if ENABLE_RBTREE
+  #define KVS_ENGINE_RBTREE
+  extern kvs_rbtree_t global_main_engine;
+  #define kvs_main_set(inst, key, value) kvs_rbtree_set(inst, key, value)
+  #define kvs_main_get(inst, key) kvs_rbtree_get(inst, key)
+  #define kvs_main_del(inst, key) kvs_rbtree_del(inst, key)
+  #define kvs_main_mod(inst, key, value) kvs_rbtree_mod(inst, key, value)
+  #define kvs_main_exist(inst, key) kvs_rbtree_exist(inst, key)
+  #define kvs_main_create(inst) kvs_rbtree_create(inst)
+  #define kvs_main_destroy(inst) kvs_rbtree_destroy(inst)
+#elif ENABLE_HASH
+  #define KVS_ENGINE_HASH
+  extern kvs_hash_t global_main_engine;
+  #define kvs_main_set(inst, key, value) kvs_hash_set(inst, key, value)
+  #define kvs_main_get(inst, key) kvs_hash_get(inst, key)
+  #define kvs_main_del(inst, key) kvs_hash_del(inst, key)
+  #define kvs_main_mod(inst, key, value) kvs_hash_mod(inst, key, value)
+  #define kvs_main_exist(inst, key) kvs_hash_exist(inst, key)
+  #define kvs_main_create(inst) kvs_hash_create(inst)
+  #define kvs_main_destroy(inst) kvs_hash_destroy(inst)
+#elif ENABLE_ARRAY
+  #define KVS_ENGINE_ARRAY
+  extern kvs_array_t global_main_engine;
+  #define kvs_main_set(inst, key, value) kvs_array_set(inst, key, value)
+  #define kvs_main_get(inst, key) kvs_array_get(inst, key)
+  #define kvs_main_del(inst, key) kvs_array_del(inst, key)
+  #define kvs_main_mod(inst, key, value) kvs_array_mod(inst, key, value)
+  #define kvs_main_exist(inst, key) kvs_array_exist(inst, key)
+  #define kvs_main_create(inst) kvs_array_create(inst)
+  #define kvs_main_destroy(inst) kvs_array_destroy(inst)
+#else
+  #error "至少需要启用一种数据结构"
+#endif
+
 // AOF缓冲区和长度（在kvstore.c中定义）
 extern char aof_buf[AOF_BUF_SIZE];
 extern int aof_len;
 
 // AOF文件描述符
 static int aof_fd = -1;
+const char* aof_filename = "appendonly.ksf";
 
 // 后台fsync线程相关
 static pthread_t fsync_thread;
@@ -224,9 +275,9 @@ void* fsync_thread_func(void* arg) {
  */
 int start_aof_fsync_process() {
     // 打开AOF文件
-    aof_fd = open("appendonly.ksf", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    aof_fd = open(aof_filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (aof_fd == -1) {
-        fprintf(stderr, "错误：无法打开AOF文件 appendonly.ksf\n");
+        fprintf(stderr, "错误：无法打开AOF文件 %s\n", aof_filename);
         return -1;
     }
 
@@ -249,4 +300,128 @@ int start_aof_fsync_process() {
 void before_sleep() {
     // 刷新AOF缓冲区到文件
     flushAofBuffer();
+}
+
+int aofLoad(const char* filename) {
+    printf("开始加载AOF文件: %s\n", filename);
+
+    // 检查文件是否存在
+    FILE* file = fopen(filename, "rb");
+    if (!file) {
+        printf("AOF文件不存在或无法打开: %s\n", filename);
+        return 0; // 文件不存在是正常的，返回成功
+    }
+
+    // 获取文件大小
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    if (file_size == 0) {
+        printf("AOF文件为空: %s\n", filename);
+        fclose(file);
+        return 0;
+    }
+
+    // 分配缓冲区读取整个文件
+    char* buffer = (char*)malloc(file_size);
+    if (!buffer) {
+        fprintf(stderr, "无法分配内存来加载AOF文件\n");
+        fclose(file);
+        return -1;
+    }
+
+    // 读取文件内容
+    size_t bytes_read = fread(buffer, 1, file_size, file);
+    if (bytes_read != file_size) {
+        fprintf(stderr, "读取AOF文件时发生错误\n");
+        kvs_free(buffer);
+        fclose(file);
+        return -1;
+    }
+
+    fclose(file);
+
+    // 解析AOF内容并恢复数据
+    long pos = 0;
+    while (pos < file_size) {
+        // 读取命令码（1字节）
+        if (pos >= file_size) break;
+        uint8_t cmd_type = buffer[pos++];
+
+        // 解码键长度（VLQ格式）
+        if (pos >= file_size) break;
+        uint64_t key_len;
+        int key_len_bytes = decode_vlq((const uint8_t*)(buffer + pos), &key_len);
+        pos += key_len_bytes;
+
+        // 解码值长度（VLQ格式）
+        if (pos >= file_size) break;
+        uint64_t val_len;
+        int val_len_bytes = decode_vlq((const uint8_t*)(buffer + pos), &val_len);
+        pos += val_len_bytes;
+
+        // 读取键内容
+        if (pos + key_len > file_size) break;
+        char* key = NULL;
+        if (key_len > 0) {
+            key = (char*)malloc(key_len + 1);
+            if (!key) {
+                fprintf(stderr, "无法分配内存来存储键\n");
+                kvs_free(buffer);
+                return -1;
+            }
+            memcpy(key, buffer + pos, key_len);
+            key[key_len] = '\0';
+            pos += key_len;
+        }
+
+        // 读取值内容
+        char* value = NULL;
+        if (val_len > 0) {
+            if (pos + val_len > file_size) {
+                if (key) kvs_free(key);
+                kvs_free(buffer);
+                return -1;
+            }
+            value = (char*)malloc(val_len + 1);
+            if (!value) {
+                fprintf(stderr, "无法分配内存来存储值\n");
+                if (key) kvs_free(key);
+                kvs_free(buffer);
+                return -1;
+            }
+            memcpy(value, buffer + pos, val_len);
+            value[val_len] = '\0';
+            pos += val_len;
+        }
+
+        // 根据命令类型执行相应的操作
+        int result = 0;
+        switch (cmd_type) {
+            case AOF_CMD_SET:
+                kvs_main_set(&global_main_engine, key, value);
+                break;
+
+            case AOF_CMD_MOD:
+                kvs_main_mod(&global_main_engine, key, value);
+                break;
+
+            case AOF_CMD_DEL:
+                kvs_main_del(&global_main_engine, key);
+                break;
+
+            default:
+                fprintf(stderr, "未知的AOF命令类型: %d\n", cmd_type);
+                break;
+        }
+
+        // 释放分配的内存
+        if (key) kvs_free(key);
+        if (value) kvs_free(value);
+    }
+
+    kvs_free(buffer);
+    printf("AOF文件加载完成: %s\n", filename);
+    return 0;
 }
