@@ -26,6 +26,9 @@
   #if ENABLE_RBTREE
     const char* ksf_filename_rbtree = "./data/dump_rbtree.ksf";
   #endif
+  #if ENABLE_SKIPLIST
+    const char* ksf_filename_skiplist = "./data/dump_skiplist.ksf";
+  #endif
 #else
   // 单引擎模式下的文件名定义
   const char* ksf_filename_default = "./data/dump.ksf";
@@ -42,6 +45,9 @@
   #if ENABLE_ARRAY
   extern kvs_array_t array_engine;
   #endif
+  #if ENABLE_SKIPLIST
+  extern kvs_skiplist_t skiplist_engine;
+  #endif
 
 #else
   // 根据优先级选择使用的数据结构：红黑树 > 哈希 > 数组
@@ -50,6 +56,8 @@
   extern kvs_rbtree_t global_main_engine;
   #elif ENABLE_HASH
   extern kvs_hash_t global_main_engine;
+  #elif ENABLE_SKIPLIST
+  extern kvs_skiplist_t global_main_engine;
   #elif ENABLE_ARRAY
   extern kvs_array_t global_main_engine;
   #else
@@ -194,7 +202,28 @@ int ksfWriteHash(int fd) {
   hash = &global_main_engine;
 #endif
 
-  for (int i = 0; i < hash->max_slots; i++) {
+  if (!hash) {
+    return -1;
+  }
+
+  // 遍历已迁移的槽（数据在rehash_nodes中）
+  if (hash->rehash_nodes && hash->rehash_state == REHASH_STATE_ACTIVE) {
+    for (int i = 0; i < hash->rehash_index && i < hash->rehash_slots; i++) {
+      hashnode_t* node = hash->rehash_nodes[i];
+      while (node != NULL) {
+        if (node->key != NULL) {
+          if (ksfWriteOneKv(fd, node->key, strlen(node->key), node->value,
+                            strlen(node->value)) != 0) {
+            return -1;
+          }
+        }
+        node = node->next;
+      }
+    }
+  }
+
+  // 遍历未迁移的槽（数据在nodes中）
+  for (int i = hash->rehash_index; i < hash->max_slots; i++) {
     hashnode_t* node = hash->nodes[i];
     while (node != NULL) {
       if (node->key != NULL) {
@@ -206,6 +235,7 @@ int ksfWriteHash(int fd) {
       node = node->next;
     }
   }
+
   return 0;
 }
 #endif
@@ -237,6 +267,42 @@ int ksfWriteArray(int fd) {
 }
 
 #endif
+
+#if ENABLE_SKIPLIST
+
+/**
+ * 遍历跳表结构，将所有KV对写入KSF文件
+ * @param fd 文件描述符
+ * @return 成功返回0，失败返回-1
+ */
+int ksfWriteSkiplist(int fd) {
+  kvs_skiplist_t* skiplist;
+#if ENABLE_MULTI_ENGINE
+  skiplist = &skiplist_engine;
+#else
+  skiplist = &global_main_engine;
+#endif
+
+  if (!skiplist || !skiplist->header) {
+    return -1;
+  }
+
+  skiplist_node_t* current = skiplist->header->forward[0];
+  while (current != NULL) {
+    if (current->key != NULL && current->value != NULL) {
+      if (ksfWriteOneKv(fd, current->key, strlen(current->key),
+                        current->value, strlen(current->value)) != 0) {
+        return -1;
+      }
+    }
+    current = current->forward[0];
+  }
+
+  return 0;
+}
+
+#endif
+
 
 /**
  * 保存KSF快照到指定文件
@@ -326,6 +392,8 @@ int ksfSave(const char* filename) {
   return ksfSaveToFile(filename, ksfWriteHash);
   #elif ENABLE_ARRAY
   return ksfSaveToFile(filename, ksfWriteArray);
+  #elif ENABLE_SKIPLIST
+  return ksfSaveToFile(filename, ksfWriteSkiplist);
   #endif
 #else
   // 多引擎模式不应该调用这个函数
@@ -360,6 +428,12 @@ int ksfSaveAll() {
   }
   #endif
 
+  #if ENABLE_SKIPLIST
+  if (ksfSaveToFile(ksf_filename_skiplist, ksfWriteSkiplist) != 0) {
+    ret = -1;
+  }
+  #endif
+
   return ret;
 #else
   // 单引擎模式：只保存主引擎
@@ -367,6 +441,8 @@ int ksfSaveAll() {
   return ksfSaveToFile(ksf_filename_default, ksfWriteRbtree);
   #elif ENABLE_HASH
   return ksfSaveToFile(ksf_filename_default, ksfWriteHash);
+  #elif ENABLE_SKIPLIST
+  return ksfSaveToFile(ksf_filename_default, ksfWriteSkiplist);
   #elif ENABLE_ARRAY
   return ksfSaveToFile(ksf_filename_default, ksfWriteArray);
   #endif
@@ -402,7 +478,7 @@ int ksfSaveBackground() {
 /**
  * 从KSF文件加载数据到指定引擎
  * @param filename 文件名
- * @param engine_type 引擎类型: 0=array, 1=hash, 2=rbtree
+ * @param engine_type 引擎类型: 0=array, 1=hash, 2=rbtree, 3=skiplist
  * @return 成功返回0，失败返回-1
  */
 static int ksfLoadToEngine(const char* filename, int engine_type) {
@@ -509,6 +585,10 @@ static int ksfLoadToEngine(const char* filename, int engine_type) {
       #if ENABLE_RBTREE
       kvs_rbtree_set(&rbtree_engine, key, value);
       #endif
+    } else if (engine_type == 3) {
+      #if ENABLE_SKIPLIST
+      kvs_skiplist_set(&skiplist_engine, key, value);
+      #endif
     }
 #else
     kvs_main_set(&global_main_engine, key, value);
@@ -559,6 +639,12 @@ int ksfLoadAll() {
 
   #if ENABLE_RBTREE
   if (ksfLoadToEngine(ksf_filename_rbtree, 2) != 0) {
+    return -1;
+  }
+  #endif
+
+  #if ENABLE_SKIPLIST
+  if (ksfLoadToEngine(ksf_filename_skiplist, 3) != 0) {
     return -1;
   }
   #endif

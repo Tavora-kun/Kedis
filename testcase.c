@@ -571,6 +571,35 @@ void hash_testcase_single_1w(int connfd) {
   printf("hash_single(3w req) --> time_used: %d ms  QPS: %d\n", time_used, 30000 * 1000 / time_used);
 }
 
+void skiplist_testcase_single_1w(int connfd) {
+
+  gettimeofday(&tv_begin, NULL);
+  const int cnt = 10000;
+  for (int i = 0; i < cnt; i++) {
+    char cmd_sset[64] = {0};
+    snprintf(cmd_sset, 64, "SSET Qbb%d Schatten%d", i, i);
+    testcase(connfd, cmd_sset, "OK\r\n", "SSET-Qbb-0");
+  }
+  for (int i = 0; i < cnt; i++) {
+    char cmd_sget[64] = {0};
+    char expect_sget[64] = {0};
+    snprintf(cmd_sget, 64, "SGET Qbb%d", i, i);
+    snprintf(expect_sget, 64, "Schatten%d\r\n", i);
+    testcase(connfd, cmd_sget, expect_sget, "SGET-Qbb-0");
+
+  }
+
+  for (int i = 0; i < cnt; i++) {
+    char cmd_sdel[64] = {0};
+    snprintf(cmd_sdel, 64, "SDEL Qbb%d", i);
+    testcase(connfd, cmd_sdel, "OK\r\n", "SDEL-Qbb-0");
+  }
+
+  gettimeofday(&tv_end, NULL);
+  int time_used = TIME_SUB_MS(tv_end, tv_begin);
+  printf("skiplist_single(3w req) --> time_used: %d ms  QPS: %d\n", time_used, 30000 * 1000 / time_used);
+}
+
 int main(int argc, char* argv[]) {
 
   if (argc != 4 && argc != 6) {
@@ -628,6 +657,7 @@ int main(int argc, char* argv[]) {
   else if (!strcmp(mode, "A")) array_testcase_single_1w(connfd_master);
   else if (!strcmp(mode, "H")) hash_testcase_single_1w(connfd_master);
   else if (!strcmp(mode, "R")) rbtree_testcase_single_1w(connfd_master);
+  else if (!strcmp(mode, "S")) skiplist_testcase_single_1w(connfd_master);
   else {
     printf("ARG_parse: ERROR\n");
     return -1;

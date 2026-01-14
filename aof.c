@@ -35,6 +35,8 @@
   extern kvs_rbtree_t global_main_engine;
   #elif ENABLE_HASH
   extern kvs_hash_t global_main_engine;
+  #elif ENABLE_SKIPLIST
+  extern kvs_skiplist_t skiplist_engine;
   #elif ENABLE_ARRAY
   extern kvs_array_t global_main_engine;
   #else
@@ -292,7 +294,7 @@ int flushAofBuffer() {
 
 /**
  * 刷新指定引擎的AOF缓冲区到文件（多引擎模式）
- * @param engine_type 引擎类型: 0=array, 1=hash, 2=rbtree
+ * @param engine_type 引擎类型: 0=array, 1=hash, 2=rbtree, 3=skiplist
  * @return 成功返回0，失败返回-1
  */
 static int flushAofBufferToEngine(int engine_type) {
@@ -312,8 +314,11 @@ static int flushAofBufferToEngine(int engine_type) {
             #if ENABLE_RBTREE
             target_fd = aof_fd_rbtree;
             #endif
+        } else if (engine_type == 3) {
+            #if ENABLE_SKIPLIST
+            target_fd = aof_fd_skiplist;
+            #endif
         }
-
         if (target_fd != -1) {
             ssize_t result = write_all(target_fd, aof_buf, aofBuffer[engine_type].len);
             if (result == -1) {
@@ -356,6 +361,11 @@ void* fsync_thread_func(void* arg) {
         #if ENABLE_RBTREE
         if (aof_fd_rbtree != -1) {
             fsync(aof_fd_rbtree);
+        }
+        #endif
+        #if ENABLE_SKIPLIST
+        if (aof_fd_skiplist != -1) {
+            fsync(aof_fd_skiplist);
         }
         #endif
 #else
@@ -780,7 +790,11 @@ void appendToAofBufferToEngine(int engine_type, int type, const char* key, const
             #if ENABLE_RBTREE
             target_fd = aof_fd_rbtree;
             #endif
-        }
+        } else if (engine_type == 3) {
+          #if ENABLE_SKIPLIST
+          target_fd = aof_fd_skiplist;
+          #endif
+      }
 #else
         target_fd = aof_fd;
 #endif
