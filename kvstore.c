@@ -100,6 +100,8 @@ kvs_skiplist_t skiplist_engine;
 kvs_rbtree_t global_main_engine;
 #elif ENABLE_HASH
 kvs_hash_t global_main_engine;
+#elif ENABLE_SKIPLIST
+kvs_skiplist_t global_main_engine;
 #elif ENABLE_ARRAY
 kvs_array_t global_main_engine;
 #else
@@ -110,7 +112,7 @@ kvs_array_t global_main_engine;
 // AOF缓冲区和长度
 #if ENABLE_MULTI_ENGINE
 
-aof_buf_t aofBuffer[3] = {0};
+aof_buf_t aofBuffer[4] = {0};
 
 #else
 aof_buf_t aofBuffer = {0};
