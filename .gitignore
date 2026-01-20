@@ -38,3 +38,4 @@ demo*
 *.old
 client/test_resp.rs
 client/test_resp
+tests/test_constants

@@ -1,4 +1,4 @@
-#include "kvstore.h"
+#include "../../kvstore.h"
 #if ENABLE_SKIPLIST
 
 #include <stdio.h>
