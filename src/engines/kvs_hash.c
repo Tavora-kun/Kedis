@@ -1,4 +1,4 @@
-#include "kvstore.h"
+#include "../../kvstore.h"
 #if ENABLE_HASH
 
 #include <stdio.h>

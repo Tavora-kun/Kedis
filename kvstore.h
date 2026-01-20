@@ -1,4 +1,3 @@
-
 #ifndef __KV_STORE_H__
 #define __KV_STORE_H__
 #include <stdio.h>
@@ -12,42 +11,48 @@
 #include <pthread.h>
 #include <unistd.h>
 
-#define NETWORK_REACTOR 	0
-#define NETWORK_PROACTOR	1
-#define NETWORK_NTYCO		2
+#include "include/kvs_constants.h"
+#include "include/kvs_hash.h"
+#include "include/kvs_rbtree.h"
+#include "include/kvs_array.h"
+#include "include/kvs_skiplist.h"
+#include "include/kvs_aof.h"
+#include "include/kvs_ksf.h"
 
-#define NETWORK_SELECT		NETWORK_PROACTOR
+// #define NETWORK_REACTOR 	0
+// #define NETWORK_PROACTOR	1
+// #define NETWORK_NTYCO		2
 
+// #define NETWORK_SELECT		NETWORK_PROACTOR
 
-
-#define KVS_MAX_TOKENS		128
+// #define KVS_MAX_TOKENS		128
 
 // 多引擎模式开关：0=单引擎模式（按优先级选择），1=多引擎模式（同时启用所有引擎）
-#define ENABLE_MULTI_ENGINE	1
+// #define ENABLE_MULTI_ENGINE	1
 
-#define ENABLE_ARRAY		1
-#define ENABLE_RBTREE		1
-#define ENABLE_HASH			1
-#define ENABLE_SKIPLIST		1
+// #define ENABLE_ARRAY		1
+// #define ENABLE_RBTREE		1
+// #define ENABLE_HASH			1
+// #define ENABLE_SKIPLIST		1
 
-#define BUFFER_SIZE 1024
-#define MAX_MULTICMD_LENGTH 8192  // 增加最大多命令长度
+// #define BUFFER_SIZE 1024
+// #define MAX_MULTICMD_LENGTH 8192  // 增加最大多命令长度
 
-#define INCREMENTAL_PERSISTENCE 1
+// #define INCREMENTAL_PERSISTENCE 1
 
 // AOF相关定义
-#define AOF_BUF_SIZE (1024*1024)  // 1MB AOF缓冲区
+// #define AOF_BUF_SIZE (1024*1024)  // 1MB AOF缓冲区
 // 应该是网络框架的问题, 导致命令解析部分在遇到大文件的情况下会出错
 
-#define AOF_SYNC_INTERVAL 1  // AOF同步间隔（秒）
+// #define AOF_SYNC_INTERVAL 1  // AOF同步间隔（秒）
 
 // AOF命令码定义
-#define AOF_CMD_SET 1
-#define AOF_CMD_MOD 2
-#define AOF_CMD_DEL 3
+// #define AOF_CMD_SET 1
+// #define AOF_CMD_MOD 2
+// #define AOF_CMD_DEL 3
 
-#define INIT_LOAD_AOF 0
-#define INIT_LOAD_SNAP 1
+// #define INIT_LOAD_AOF 0
+// #define INIT_LOAD_SNAP 1
 
 typedef int (*msg_handler)(char *msg, int length, char *response);
 
@@ -69,6 +74,7 @@ typedef struct {
 // 红黑树引擎定义
 #if ENABLE_RBTREE
 
+/* 已移至 include/kvs_rbtree.h
   #define RED				1
   #define BLACK 			2
 
@@ -104,12 +110,13 @@ typedef struct {
   int kvs_rbtree_del(kvs_rbtree_t *inst, char *key);
   int kvs_rbtree_mod(kvs_rbtree_t *inst, char *key, char *value);
   int kvs_rbtree_exist(kvs_rbtree_t *inst, char *key);
-
+*/
 #endif
 
 // 哈希表引擎定义
 #if ENABLE_HASH
 
+  /* 已移至 include/kvs_hash.h
   #define MAX_KEY_LEN	128
   #define MAX_VALUE_LEN	512
   #define MAX_TABLE_SIZE	1024
@@ -182,11 +189,13 @@ typedef struct {
   int kvs_hash_step_rehash(hashtable_t *hash);
   void kvs_hash_finish_rehash(hashtable_t *hash);
   int kvs_hash_is_rehashing(hashtable_t *hash);
+  */
 
 #endif
 
 // 数组引擎定义
 #if ENABLE_ARRAY
+  /* 已移至 include/kvs_array.h
   #define KVS_ARRAY_SIZE 16384
 
   // 元素
@@ -209,12 +218,13 @@ typedef struct {
   int kvs_array_del(kvs_array_t *inst, char *key);
   int kvs_array_mod(kvs_array_t *inst, char *key, char *value);
   int kvs_array_exist(kvs_array_t *inst, char *key);
-
+  */
 #endif
 
 // Skiplist引擎定义
 #if ENABLE_SKIPLIST
 
+/* 已移至 include/kvs_skiplist.h
   #define SKIPLIST_MAX_LEVEL 6
 
   typedef struct skiplist_node_s {
@@ -237,7 +247,7 @@ typedef struct {
   int kvs_skiplist_del(kvs_skiplist_t *inst, char *key);
   int kvs_skiplist_mod(kvs_skiplist_t *inst, char *key, char *value);
   int kvs_skiplist_exist(kvs_skiplist_t *inst, char *key);
-
+*/
 #endif
 
 // 单引擎模式的统一接口定义（仅在非多引擎模式下使用）
@@ -284,9 +294,12 @@ typedef struct {
 #endif
 
 // mmap 持久化落盘的核心函数
+/* 已移至 include/kvs_aof.h
 int mmap_append(int fd, const char* filename, char *data, size_t n);
+*/
 
 // KSF持久化相关函数声明
+/* 已移至 include/kvs_ksf.h
 int ksfSave(const char *filename);  // 保存KSF快照
 int ksfSaveBackground(void);  // 后台保存KSF快照
 int ksfLoad(const char *filename);  // 加载KSF快照
@@ -296,8 +309,10 @@ int ksfLoad(const char *filename);  // 加载KSF快照
 int ksfSaveAll(void);  // 保存所有引擎的KSF快照
 int ksfLoadAll(void);  // 加载所有引擎的KSF快照
 #endif
+*/
 
 // AOF相关函数声明
+/* 已移至 include/kvs_aof.h
 void appendToAofBuffer(int type, const char* key, const char* value);  // 添加到AOF缓冲区
 int flushAofBuffer(void);  // 刷新AOF缓冲区
 int start_aof_fsync_process(void);  // 启动AOF同步线程
@@ -309,6 +324,7 @@ int aofLoad(const char* filename);  // 加载AOF文件
 int aofLoadAll(void);  // 加载所有引擎的AOF文件
 void appendToAofBufferToEngine(int engine_type, int type, const char* key, const char* value);  // 向指定引擎的AOF文件写入命令
 #endif
+*/
 
 // 复制相关函数声明
 int handle_sync_command(int fd);
@@ -363,6 +379,3 @@ extern __thread int current_processing_fd;
 void replication_feed_slaves(const char *cmd);
 
 #endif
-
-
-
