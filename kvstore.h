@@ -18,6 +18,8 @@
 #include "include/kvs_skiplist.h"
 #include "include/kvs_aof.h"
 #include "include/kvs_ksf.h"
+#include "include/kvs_network.h"
+#include "include/memory_pool.h"
 
 // #define NETWORK_REACTOR 	0
 // #define NETWORK_PROACTOR	1
@@ -54,12 +56,14 @@
 // #define INIT_LOAD_AOF 0
 // #define INIT_LOAD_SNAP 1
 
+/* 已移至 include/kvs_network.h
 typedef int (*msg_handler)(char *msg, int length, char *response);
 
 
 extern int reactor_start(unsigned short port, msg_handler handler);
 extern int proactor_start(unsigned short port, msg_handler handler);
 extern int ntyco_start(unsigned short port, msg_handler handler);
+*/
 
 void* kvs_calloc(size_t num, size_t size);
 void *kvs_malloc(size_t size);

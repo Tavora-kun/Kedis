@@ -13,7 +13,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include "kvstore.h"
+#include "../../kvstore.h"
 
 /* ---------------- 常量定义 ---------------- */
 #define MAX_CONNS 100000                   // 最大并发连接数

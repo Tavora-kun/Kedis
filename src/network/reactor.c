@@ -14,7 +14,7 @@
 #include <sys/time.h>
 
 
-#include "server.h"
+#include "reactor_server.h"
 
 
 #define CONNECTION_SIZE			1024 // 1024 * 1024
