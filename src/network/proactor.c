@@ -187,7 +187,42 @@ static void post_recv_frame(struct io_uring* ring, struct conn* c) {
 /* ---------------- 提交异步 send：回 RESP 包 ---------------- */
 static void post_send_resp(struct io_uring* ring, struct conn* c) {
   struct io_uring_sqe* sqe = sqe_prep(ring, c);
-  io_uring_prep_send(sqe, c->fd, c->wbuf + c->wdone, c->wlen - c->wdone, 0);
+
+  // 检查是否启用流式发送
+  if (c->is_streaming) {
+    // 流式发送模式：根据状态机发送对应数据
+    const char* data_ptr = NULL;
+    size_t to_send = 0;
+
+    switch (c->stream_state) {
+      case STREAM_STATE_HEADER:
+        data_ptr = c->stream_header + c->header_sent;
+        to_send = c->header_len - c->header_sent;
+        break;
+
+      case STREAM_STATE_DATA: {
+        size_t remaining = c->stream_total_len - c->stream_sent_len;
+        to_send = (remaining < c->stream_chunk_size) ? remaining : c->stream_chunk_size;
+        data_ptr = c->stream_data + c->stream_sent_len;
+        break;
+      }
+
+      case STREAM_STATE_TAIL:
+        data_ptr = c->stream_tail + c->tail_sent;
+        to_send = 2 - c->tail_sent;  // "\r\n"
+        break;
+
+      default:
+        data_ptr = c->wbuf + c->wdone;
+        to_send = c->wlen - c->wdone;
+        break;
+    }
+
+    io_uring_prep_send(sqe, c->fd, data_ptr, to_send, 0);
+  } else {
+    // 普通模式：发送 wbuf
+    io_uring_prep_send(sqe, c->fd, c->wbuf + c->wdone, c->wlen - c->wdone, 0);
+  }
 }
 
 /* ---------------- 提交异步 close ---------------- */
@@ -563,36 +598,97 @@ int proactor_start(unsigned short port, msg_handler handler) {
 
       // 发我们准备好的数据过去
       case ST_SEND:
-        c->wdone += res;
-        if (c->wdone == c->wlen) {  // 发完
-          c->state = ST_RECV;
+        // 流式发送：更新状态机，普通发送：更新 wdone
+        if (c->is_streaming) {
+          // 更新流式发送状态机
+          switch (c->stream_state) {
+            case STREAM_STATE_HEADER:
+              c->header_sent += res;
+              if (c->header_sent >= (size_t)c->header_len) {
+                c->stream_state = STREAM_STATE_DATA;
+              }
+              break;
 
-          // 如果有剩余数据，尝试解析下一条
-          if (ring_buffer_available(c) > 0) {
-            int n = kvs_resp_feed(c);
-            if (n == PARSE_OK) {
-              current_processing_fd = c->fd;
-              c->wlen = 0; // 重置写缓冲区长度
-              processCommand(c);
-              current_processing_fd = -1;
-              kvs_resp_reset(c);
-              c->state = ST_SEND;
-              c->wdone = 0;
-              post_send_resp(&g_ring, c);
-            } else if (n < 0) {
-              conn_free(c);
-              conn_pool_free(&g_conn_pool, c);
+            case STREAM_STATE_DATA:
+              c->stream_sent_len += res;
+              if (c->stream_sent_len >= c->stream_total_len) {
+                c->stream_state = STREAM_STATE_TAIL;
+              }
+              break;
+
+            case STREAM_STATE_TAIL:
+              c->tail_sent += res;
+              if (c->tail_sent >= 2) {  // "\r\n" 完成
+                c->stream_state = STREAM_STATE_DONE;
+              }
+              break;
+
+            default:
+              break;
+          }
+
+          // 检查流式发送是否完成
+          if (c->stream_state == STREAM_STATE_DONE) {
+            reset_streaming_send(c);
+            c->state = ST_RECV;
+
+            // 如果有剩余数据，尝试解析下一条
+            if (ring_buffer_available(c) > 0) {
+              int n = kvs_resp_feed(c);
+              if (n == PARSE_OK) {
+                current_processing_fd = c->fd;
+                c->wlen = 0;
+                processCommand(c);
+                current_processing_fd = -1;
+                kvs_resp_reset(c);
+                c->state = ST_SEND;
+                c->wdone = 0;
+                post_send_resp(&g_ring, c);
+              } else if (n < 0) {
+                conn_free(c);
+                conn_pool_free(&g_conn_pool, c);
+              } else {
+                post_recv_frame(&g_ring, c);
+              }
             } else {
-              // 依然不够
               post_recv_frame(&g_ring, c);
             }
           } else {
-            post_recv_frame(&g_ring, c);  // 准备下一条命令
+            // 继续发送剩余的流式数据
+            post_send_resp(&g_ring, c);
           }
-        } else {
-          post_send_resp(&g_ring, c);
-        }
-        break;
+          } else {
+            // 普通发送模式：只在非流式时使用
+            c->wdone += res;
+            if (c->wdone >= (size_t)c->wlen) {  // 发完
+              c->state = ST_RECV;
+
+              // 如果有剩余数据，尝试解析下一条
+              if (ring_buffer_available(c) > 0) {
+                int n = kvs_resp_feed(c);
+                if (n == PARSE_OK) {
+                  current_processing_fd = c->fd;
+                  c->wlen = 0;
+                  processCommand(c);
+                  current_processing_fd = -1;
+                  kvs_resp_reset(c);
+                  c->state = ST_SEND;
+                  c->wdone = 0;
+                  post_send_resp(&g_ring, c);
+                } else if (n < 0) {
+                  conn_free(c);
+                  conn_pool_free(&g_conn_pool, c);
+                } else {
+                  post_recv_frame(&g_ring, c);
+                }
+              } else {
+                post_recv_frame(&g_ring, c);
+              }
+            } else {
+              post_send_resp(&g_ring, c);
+            }
+          }
+          break;
       case ST_CLOSE:
         conn_free(c);
         conn_pool_free(&g_conn_pool, c);

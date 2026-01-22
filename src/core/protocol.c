@@ -210,7 +210,7 @@ int kvs_resp_feed(struct conn* c) {
   size_t done = 0;
 
   // 调试信息
-  // fprintf(stderr, "kvs_resp_feed: fd=%d, available=%zu\n", c->fd, len);
+  fprintf(stderr, "kvs_resp_feed: fd=%d, available=%zu\n", c->fd, len);
 
   // 目标, 把目前收到的数据, 全部处理成 RESP
   while (done < initial_len) {
@@ -239,24 +239,24 @@ int kvs_resp_feed(struct conn* c) {
     
     // fprintf(stderr, "kvs_resp_feed: done=%zu, peeked=%d, remaining=%zu\n", done, peeked, remaining);
     
-    // 调试：打印 temp_buf 的内容
-    // fprintf(stderr, "kvs_resp_feed: temp_buf (first 32 bytes): ");
-    // for (int i = 0; i < 32 && i < peeked; i++) {
-    //     fprintf(stderr, "%02x ", (unsigned char)temp_buf[i]);
-    // }
-    // fprintf(stderr, "\n");
+  // 调试：打印 temp_buf 的内容
+  fprintf(stderr, "kvs_resp_feed: temp_buf (first 32 bytes): ");
+  for (int i = 0; i < 32 && i < peeked; i++) {
+      fprintf(stderr, "%02x ", (unsigned char)temp_buf[i]);
+  }
+  fprintf(stderr, "\n");
     
     switch (c->resp_state) {
       case ST_RESP_HDR: {
         // 期待 *<argc>\r\n
         char* nl = memchr(data, '\n', remaining);
         if (!nl) {
-          // fprintf(stderr, "kvs_resp_feed: ST_RESP_HDR, no newline found\n");
+          fprintf(stderr, "kvs_resp_feed: ST_RESP_HDR, no newline found\n");
           return done;  // 还没收全一行
         }
 
         if (nl <= data || *(nl - 1) != '\r') {
-          // fprintf(stderr, "kvs_resp_feed: ST_RESP_HDR, invalid format\n");
+          fprintf(stderr, "kvs_resp_feed: ST_RESP_HDR, invalid format\n");
           return -1;  // 格式错误
         }
 
@@ -267,11 +267,11 @@ int kvs_resp_feed(struct conn* c) {
           c->multibulk_len = num; // 找到了想要的值
           c->argc = 0; // 接下来开始解析各个段咯,argc是已经收取的段数量
           if (num <= 0 || num > MAX_ARGC) {
-            // fprintf(stderr, "kvs_resp_feed: ST_RESP_HDR, invalid argc=%ld\n", num);
+            fprintf(stderr, "kvs_resp_feed: ST_RESP_HDR, invalid argc=%ld\n", num);
             return -1;
           }
           c->resp_state = ST_RESP_BULK_LEN;  // 接下来期待参数长度
-          // fprintf(stderr, "kvs_resp_feed: ST_RESP_HDR, parsed argc=%ld\n", num);
+          fprintf(stderr, "kvs_resp_feed: ST_RESP_HDR, parsed argc=%ld\n", num);
         } else {
           // 如果不是 *, 可能直接是 Inline command? 这里只支持标准 RESP 数组
           // fprintf(stderr, "kvs_resp_feed: ST_RESP_HDR, invalid prefix=%c\n", prefix);
@@ -288,12 +288,12 @@ int kvs_resp_feed(struct conn* c) {
         // 期待 $<len>\r\n
         char* nl = memchr(data, '\n', remaining);
         if (!nl) {
-          // fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_LEN, no newline found\n");
+          fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_LEN, no newline found\n");
           return done;
         }
 
         if (nl <= data || *(nl - 1) != '\r' || *data != '$') {
-          // fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_LEN, invalid format\n");
+          fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_LEN, invalid format\n");
           return -1; // 检查是否合法(RESP协议)
         }
 
@@ -301,20 +301,30 @@ int kvs_resp_feed(struct conn* c) {
         c->bulk_len = len_val; // 获取到想要的了!
 
         if (len_val < 0) {  // NULL Bulk String ($ -1)
-          // fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_LEN, null bulk string\n");
+          fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_LEN, null bulk string\n");
           return -1;
         }
         if (len_val > MAX_SEG_SIZE) {
-          // fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_LEN, bulk too large=%ld\n", len_val);
+          fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_LEN, bulk too large=%ld\n", len_val);
           return -1; // 超过1GB的 Key 或者 Value,不读
         }
 
-        // 分配内存准备接收数据
-        c->seg_buf = kvs_malloc(len_val + 1);  // +1 for null terminator
-        if (!c->seg_buf) {
-          // fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_LEN, malloc failed\n");
-          return -1;  // 内存分配失败
+         // 分配内存准备接收数据
+        // 对于大bulk数据（> IOP_SIZE），使用系统malloc
+        void* alloc_buf = NULL;
+        if (len_val > IOP_SIZE) {
+          alloc_buf = malloc(len_val + 1);
+          fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_LEN, large bulk (%ld bytes), using system malloc\n", len_val);
+        } else {
+          alloc_buf = kvs_malloc(len_val + 1);
         }
+
+        if (!alloc_buf) {
+          fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_LEN, malloc failed for %ld bytes\n", len_val);
+          return -1;
+        }
+
+        c->seg_buf = alloc_buf;
         c->seg_buf[len_val] = '\0';
         c->seg_used = 0;
 
@@ -322,7 +332,7 @@ int kvs_resp_feed(struct conn* c) {
         size_t line_len = (nl - data) + 1;
         done += line_len;
         ring_buffer_skip(c, line_len);
-        // fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_LEN, parsed bulk_len=%ld, skipped %zu bytes, done=%zu\n", len_val, line_len, done);
+        fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_LEN, parsed bulk_len=%ld, skipped %zu bytes, done=%zu\n", len_val, line_len, done);
         break;
       }
       case ST_RESP_BULK_DATA: {
@@ -341,13 +351,13 @@ int kvs_resp_feed(struct conn* c) {
         c->seg_used += read_len;
         done += read_len;
 
-        // fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_DATA, read %d bytes, seg_used=%zu, bulk_len=%ld\n", read_len, c->seg_used, c->bulk_len);
+        fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_DATA, read %d bytes, seg_used=%zu, bulk_len=%ld\n", read_len, c->seg_used, c->bulk_len);
 
         if (c->seg_used == (size_t)c->bulk_len) {
           // 数据读完了，期待 \r\n
           if (ring_buffer_available(c) < 2) {
             // 还没收到 \r\n，等待
-            // fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_DATA, waiting for CRLF\n");
+            fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_DATA, waiting for CRLF\n");
             return done;
           }
 
@@ -355,17 +365,17 @@ int kvs_resp_feed(struct conn* c) {
           ring_buffer_read(c, crlf, 2);
           
           if (crlf[0] != '\r' || crlf[1] != '\n') {
-            // fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_DATA, invalid CRLF\n");
+            fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_DATA, invalid CRLF\n");
             return -1;
           }
           done += 2;
-          // fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_DATA, read CRLF, done=%zu\n", done);
+          fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_DATA, read CRLF, done=%zu\n", done);
 
           // 参数完整，存入 argv
           c->argv[c->argc++] = (robj){c->seg_buf, c->bulk_len};
           c->seg_buf = NULL;  // 权责移交
 
-          // fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_DATA, argument complete, argc=%d\n", c->argc);
+          fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_DATA, argument complete, argc=%d\n", c->argc);
 
           if (c->argc == c->multibulk_len) {
             // 所有参数解析完毕
@@ -374,7 +384,7 @@ int kvs_resp_feed(struct conn* c) {
           } else {
             // 继续下一个参数
             c->resp_state = ST_RESP_BULK_LEN;
-            // fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_DATA, continue to next parameter\n");
+            fprintf(stderr, "kvs_resp_feed: ST_RESP_BULK_DATA, continue to next parameter\n");
           }
         }
         break;

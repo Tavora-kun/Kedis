@@ -302,6 +302,10 @@ typedef struct {
 int mmap_append(int fd, const char* filename, char *data, size_t n);
 */
 
+// 流式发送相关函数声明
+extern void reset_streaming_send(struct conn* c);
+extern int init_streaming_send(struct conn* c, const char* data, size_t len);
+
 // KSF持久化相关函数声明
 /* 已移至 include/kvs_ksf.h
 int ksfSave(const char *filename);  // 保存KSF快照

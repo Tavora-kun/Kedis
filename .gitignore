@@ -45,3 +45,4 @@ test_4mb_simple
 test_large_packet
 test_large_packet_30k
 test_streaming_recv
+debug_streaming
