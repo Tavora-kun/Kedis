@@ -371,7 +371,7 @@ int kvs_hash_del(kvs_hash_t *hash, char *key) {
 		node = node->next;
 	}
 
-	return -1;
+	return 1;
 }
 
 int kvs_hash_exist(kvs_hash_t *hash, char *key) {

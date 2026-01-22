@@ -9,9 +9,6 @@
 // 当前选择的网络模型
 #define NETWORK_SELECT		NETWORK_PROACTOR
 
-// Token 解析配置
-#define KVS_MAX_TOKENS		128
-
 // 多引擎模式开关：0=单引擎模式（按优先级选择），1=多引擎模式（同时启用所有引擎）
 #define ENABLE_MULTI_ENGINE	1
 
@@ -39,7 +36,5 @@
 #define INIT_LOAD_AOF 0
 #define INIT_LOAD_SNAP 1
 
-// 流式发送阈值：超过此大小使用流式发送
-#define STREAMING_THRESHOLD (1024 * 1024)  // 1MB
 
 #endif // __KVS_CONSTANTS_H__

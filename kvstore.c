@@ -342,7 +342,7 @@ int kvs_protocol(struct conn* c) {
         }
         add_reply_status(c, "OK");
       } else {
-        add_reply_error(c, "Not Exist");
+        add_reply_error(c, "ERROR / Not Exist");
       }
       break;
     case KVS_CMD_AMOD:
@@ -401,7 +401,7 @@ int kvs_protocol(struct conn* c) {
         }
         add_reply_status(c, "OK");
       } else {
-        add_reply_error(c, "Not Exist");
+        add_reply_error(c, "ERROR / Not Exist");
       }
       break;
     case KVS_CMD_HMOD:
@@ -460,7 +460,7 @@ int kvs_protocol(struct conn* c) {
         }
         add_reply_status(c, "OK");
       } else {
-        add_reply_error(c, "Not Exist");
+        add_reply_error(c, "ERROR / Not Exist");
       }
       break;
     case KVS_CMD_RMOD:
@@ -517,7 +517,7 @@ int kvs_protocol(struct conn* c) {
         }
         add_reply_status(c, "OK");
       } else {
-        add_reply_error(c, "Not Exist");
+        add_reply_error(c, "ERROR / Not Exist");
       }
       break;
     case KVS_CMD_SMOD:

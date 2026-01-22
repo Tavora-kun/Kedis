@@ -186,7 +186,7 @@ int kvs_skiplist_del(kvs_skiplist_t *skiplist, char *key) {
 
         return 0;
     } else {
-        return -1;
+        return 1;
     }
 }
 

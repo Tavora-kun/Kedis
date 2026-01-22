@@ -13,7 +13,6 @@ int main() {
     
     assert(NETWORK_SELECT == NETWORK_PROACTOR);
     
-    assert(KVS_MAX_TOKENS == 128);
     assert(ENABLE_MULTI_ENGINE == 1);
     
     assert(ENABLE_ARRAY == 1);
