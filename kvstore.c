@@ -273,7 +273,7 @@ static void add_reply_exist(struct conn* c, int exists) {
 /* ---------------- 流式发送相关函数 ---------------- */
 
 // 初始化流式发送状态
-static int init_streaming_send(struct conn* c, const char* data, size_t len) {
+int init_streaming_send(struct conn* c, const char* data, size_t len) {
     if (c == NULL || data == NULL || len == 0) {
         return -1;
     }
