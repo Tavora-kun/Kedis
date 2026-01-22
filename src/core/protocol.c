@@ -4,6 +4,8 @@
 #include "../../include/kvs_protocol.h"
 #include "../../kvstore.h"
 
+
+
 /* ---------------- 从 proactor.c 迁移过来的 RESP 协议解析逻辑 ---------------- */
 
 void kvs_resp_reset(struct conn* c) {
@@ -25,6 +27,11 @@ void kvs_resp_reset(struct conn* c) {
   c->bulk_len = 0;
   c->seg_used = 0;
   c->resp_state = ST_RESP_HDR;
+  
+  // 重置流式接收状态
+  c->streaming_recv = 0;           // 退出流式模式，回到正常模式
+  c->remaining_bulk_len = 0;       // 重置剩余 bulk data 长度
+  c->need_crlf = 0;                // 重置 \r\n 标记
 }
 
 void kvs_resp_free_resources(struct conn* c) {
@@ -107,46 +114,91 @@ int kvs_resp_feed(struct conn* c) {
         break;
       }
       case ST_RESP_BULK_DATA: {
-        // 读取 bulk_len 字节
+        // want: 还需要多少 bulk data（从 seg_used 到 bulk_len 的距离）
         size_t want = c->bulk_len - c->seg_used;
+        
+        // avail: frame 中还有多少数据可用（从 done 到 len 的距离）
         size_t avail = len - done;
+        
+        // cp: 这次复制多少数据（取 want 和 avail 的较小值，避免越界）
         size_t cp = (want < avail) ? want : avail;
 
+        // 从 frame 复制数据到 seg_buf
         memcpy(c->seg_buf + c->seg_used, data + done, cp);
+        
+        // 更新 seg_used（已经接收的 bulk data 长度）
         c->seg_used += cp;
+        
+        // 更新 done（frame 中已经处理的数据位置）
         done += cp;
 
+        // 检查 bulk data 是否收全
         if (c->seg_used == (size_t)c->bulk_len) {
-          // 数据读完了，期待 \r\n
+          // bulk data 收全了，现在检查 \r\n
+          
+          // 检查 frame 中是否有足够的数据接收 \r\n
           if (done + 2 > len) {
-            // 还没收到 \r\n，等待
-            return done;
+            // frame 中的数据已经处理完了，但还没收到 \r\n
+            
+            // 移除 frame 中已处理的数据
+            int left = len - done;
+            if (left > 0 && done > 0) {
+              memmove(c->frame, c->frame + done, left);
+            }
+            c->r_len = left;
+            
+            // 设置流式接收状态
+            c->streaming_recv = 1;           // 进入流式模式
+            c->remaining_bulk_len = 0;       // bulk data 已经收全
+            c->need_crlf = 1;                // 还需要接收 \r\n
+            
+            // 返回特殊值，告诉主循环需要流式接收
+            return NEED_STREAMING_RECV;
           }
-
+          
+          // 检查 \r\n 是否正确
           if (data[done] != '\r' || data[done + 1] != '\n') {
-            return -1;
+            return -1;  // 协议错误
           }
           done += 2;
-
+          
           // 参数完整，存入 argv
           c->argv[c->argc++] = (robj){c->seg_buf, c->bulk_len};
-          c->seg_buf = NULL;  // 权责移交
-
+          c->seg_buf = NULL;  // 权责移交，argv 负责 seg_buf 的内存
+          
+          // 检查是否所有参数都解析完毕
           if (c->argc == c->multibulk_len) {
             // 所有参数解析完毕
-
-            // 移除已处理数据
+            
+            // 移除 frame 中已处理的数据
             int left = len - done;
             if (left > 0) {
               memmove(c->frame, c->frame + done, left);
             }
             c->r_len = left;
-
+            
             return PARSE_OK;
           } else {
             // 继续下一个参数
             c->resp_state = ST_RESP_BULK_LEN;
           }
+        } else {
+          // bulk data 没收全，且 frame 中的数据已经处理完了
+          
+          // 移除 frame 中已处理的数据
+          int left = len - done;
+          if (left > 0 && done > 0) {
+            memmove(c->frame, c->frame + done, left);
+          }
+          c->r_len = left;
+          
+          // 设置流式接收状态
+          c->streaming_recv = 1;                           // 进入流式模式
+          c->remaining_bulk_len = c->bulk_len - c->seg_used;  // 还需要接收多少 bulk data
+          c->need_crlf = 1;                                // 收全 bulk data 后还需要 \r\n
+          
+          // 返回特殊值，告诉主循环需要流式接收
+          return NEED_STREAMING_RECV;
         }
         break;
       }

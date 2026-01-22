@@ -49,6 +49,15 @@ struct conn {
   char* seg_buf;    // 当前参数的 buffer
   size_t seg_used;  // 当前参数已填入的字节数
 
+  /* ---- 流式接收状态 ---- */
+  int streaming_recv;          // 标记是否正在进行流式接收（0: 正常模式，1: 流式模式）
+                                // 正常模式：数据先进入 frame，再复制到 seg_buf
+                                // 流式模式：数据直接进入 seg_buf，跳过 frame
+  size_t remaining_bulk_len;   // 还需要接收的 bulk data 长度（用于流式接收）
+                                // 例如：bulk_len = 4MB，seg_used = 1MB，则 remaining_bulk_len = 3MB
+  int need_crlf;               // 标记是否还需要接收 \r\n（0: 不需要，1: 需要）
+                                // RESP 协议要求 bulk data 后面必须有 \r\n
+
   /* ---- 写回 ---- */
   char* wbuf;       // 回包缓冲（+OK\r\n 或 $len\r\n...）
   int wlen, wdone;  // 总长度 & 已发长度

@@ -101,16 +101,52 @@ static void post_accept(struct io_uring* ring, int listenfd) {
   io_uring_sqe_set_data(sqe, dummy);
 }
 
+/* ---------------- 提交异步 close ---------------- */
+static void post_close(struct io_uring* ring, struct conn* c) {
+  struct io_uring_sqe* sqe = sqe_prep(ring, c);
+  io_uring_prep_close(sqe, c->fd);
+}
 /* ---------------- 提交异步 recv ---------------- */
 static void post_recv_frame(struct io_uring* ring, struct conn* c) {
-  // 如果 buffer 快满了，移动数据到开头
-  if (c->r_len == IOP_SIZE) {
-    fprintf(stderr, "Buffer full, connection too slow or msg too big\n");
-    // TODO:这里简单处理：关闭连接，或者扩容。
-  }
+  // 获取一个 SQE（提交队列条目）
   struct io_uring_sqe* sqe = sqe_prep(ring, c);
-  // 从 r_len 处开始接收，最大接收 IOP_SIZE - r_len
-  io_uring_prep_recv(sqe, c->fd, c->frame + c->r_len, IOP_SIZE - c->r_len, 0);
+  
+  // 检查是否处于流式接收模式
+  if (c->streaming_recv) {
+    // 流式接收模式：数据直接写入 seg_buf，跳过 frame
+    
+    if (c->remaining_bulk_len > 0) {
+      // 还需要接收 bulk data
+      // 从 c->seg_buf + c->seg_used 的位置开始接收
+      // 最多接收 c->remaining_bulk_len 字节
+      io_uring_prep_recv(sqe, c->fd, 
+                         c->seg_buf + c->seg_used, 
+                         c->remaining_bulk_len, 0);
+    } else if (c->need_crlf) {
+      // bulk data 已经收全，现在需要接收 \r\n
+      // \r\n 接收到 seg_buf 的末尾（预留了 2 字节空间）
+      io_uring_prep_recv(sqe, c->fd, 
+                         c->seg_buf + c->bulk_len, 2, 0);
+    }
+  } else {
+    // 正常模式：数据先进入 frame
+    
+    // 检查 frame 是否满了
+    if (c->r_len == IOP_SIZE) {
+      // frame 满了，但不是流式接收状态，这是错误
+      fprintf(stderr, "Buffer full error\n");
+      // 关闭连接
+      c->state = ST_CLOSE;
+      post_close(ring, c);
+      return;
+    }
+    
+    // 从 c->frame + c->r_len 的位置开始接收
+    // 最多接收 IOP_SIZE - c->r_len 字节
+    io_uring_prep_recv(sqe, c->fd, 
+                       c->frame + c->r_len, 
+                       IOP_SIZE - c->r_len, 0);
+  }
 }
 
 /* ---------------- 提交异步 send：回 RESP 包 ---------------- */
@@ -119,11 +155,6 @@ static void post_send_resp(struct io_uring* ring, struct conn* c) {
   io_uring_prep_send(sqe, c->fd, c->wbuf + c->wdone, c->wlen - c->wdone, 0);
 }
 
-/* ---------------- 提交异步 close ---------------- */
-static void post_close(struct io_uring* ring, struct conn* c) {
-  struct io_uring_sqe* sqe = sqe_prep(ring, c);
-  io_uring_prep_close(sqe, c->fd);
-}
 
 /* ---------------- 释放连接资源 ---------------- */
 static void conn_free(struct conn* c) {
@@ -251,35 +282,141 @@ int proactor_start(unsigned short port, msg_handler handler) {
     switch (c->state) {
       // 来了一个请求, 处理一下
       case ST_RECV: {
-        if (res == 0) {  // EOF
+        if (res == 0) {  // EOF，客户端关闭连接
           conn_free(c);
           conn_pool_free(&g_conn_pool, c);
           break;
         } else if (res > 0) {
-          c->r_len += res;  // 更新有效数据长度
-        }
-        
-        // resp_feed -> kvs_resp_feed
-        int n = kvs_resp_feed(c);  // 喂给 RESP 状态机
-
-        if (n < 0) {
-          conn_free(c);
-          conn_pool_free(&g_conn_pool, c);  // 协议错误
-        } else if (n == PARSE_OK) {         // 整条命令完整
-          current_processing_fd = c->fd;
-          c->wlen = 0;
-          processCommand(c);
-          current_processing_fd = -1;
-
-          // conn_reset -> kvs_resp_reset
-          kvs_resp_reset(c);  // 清空解析状态（释放旧参数），准备下一次
-
-          c->state = ST_SEND;
-          c->wdone = 0;
-          post_send_resp(&g_ring, c);  // 发送响应
-        } else {
-          // 数据不够，继续接收
-          post_recv_frame(&g_ring, c);
+          // 检查是否处于流式接收模式
+          if (c->streaming_recv) {
+            // 流式接收模式
+            
+            if (c->remaining_bulk_len > 0) {
+              // 收到了 bulk data
+              
+              // 更新 seg_used（已经接收的 bulk data 长度）
+              c->seg_used += res;
+              
+              // 更新 remaining_bulk_len（还需要接收多少 bulk data）
+              c->remaining_bulk_len -= res;
+              
+              if (c->remaining_bulk_len == 0) {
+                // bulk data 收全了，现在需要 \r\n
+                c->need_crlf = 1;
+                post_recv_frame(&g_ring, c);  // 投递接收 \r\n 的请求
+              } else {
+                // 还需要更多 bulk data
+                post_recv_frame(&g_ring, c);  // 投递接收 bulk data 的请求
+              }
+            } else if (c->need_crlf) {
+              // 收到了 \r\n
+              
+              if (res == 2 && c->seg_buf[c->bulk_len] == '\r' && 
+                  c->seg_buf[c->bulk_len + 1] == '\n') {
+                // \r\n 收全了，且格式正确
+                
+                // 重置流式接收状态
+                c->streaming_recv = 0;
+                c->need_crlf = 0;
+                
+                // 参数完整，存入 argv
+                c->argv[c->argc++] = (robj){c->seg_buf, c->bulk_len};
+                c->seg_buf = NULL;  // 权责移交，argv 负责 seg_buf 的内存
+                
+                if (c->argc == c->multibulk_len) {
+                  // 所有参数解析完毕
+                  
+                  // 处理命令
+                  current_processing_fd = c->fd;
+                  c->wlen = 0;
+                  processCommand(c);
+                  current_processing_fd = -1;
+                  
+                  // 清空解析状态
+                  kvs_resp_reset(c);
+                  
+                  // 切换到发送状态
+                  c->state = ST_SEND;
+                  c->wdone = 0;
+                  post_send_resp(&g_ring, c);  // 发送响应
+                } else {
+                  // 继续下一个参数
+                  c->resp_state = ST_RESP_BULK_LEN;
+                  
+                  // 检查 frame 中是否有剩余数据
+                  if (c->r_len > 0) {
+                    // frame 中有剩余数据，尝试解析
+                    int n = kvs_resp_feed(c);
+                    
+                    if (n < 0) {
+                      // 协议错误
+                      conn_free(c);
+                      conn_pool_free(&g_conn_pool, c);
+                    } else if (n == PARSE_OK) {
+                      // 整条命令完整
+                      current_processing_fd = c->fd;
+                      c->wlen = 0;
+                      processCommand(c);
+                      current_processing_fd = -1;
+                      kvs_resp_reset(c);
+                      c->state = ST_SEND;
+                      c->wdone = 0;
+                      post_send_resp(&g_ring, c);
+                    } else if (n == NEED_STREAMING_RECV) {
+                      // 需要流式接收
+                      post_recv_frame(&g_ring, c);
+                    } else {
+                      // 数据不够，继续接收
+                      post_recv_frame(&g_ring, c);
+                    }
+                  } else {
+                    // frame 中没有剩余数据，继续接收
+                    post_recv_frame(&g_ring, c);
+                  }
+                }
+              } else {
+                // \r\n 格式错误
+                conn_free(c);
+                conn_pool_free(&g_conn_pool, c);
+              }
+            }
+          } else {
+            // 正常接收模式
+            
+            // 更新有效数据长度
+            c->r_len += res;
+            
+            // 喂给 RESP 状态机
+            int n = kvs_resp_feed(c);
+            
+            if (n < 0) {
+              // 协议错误
+              conn_free(c);
+              conn_pool_free(&g_conn_pool, c);
+            } else if (n == PARSE_OK) {
+              // 整条命令完整
+              
+              // 处理命令
+              current_processing_fd = c->fd;
+              c->wlen = 0;
+              processCommand(c);
+              current_processing_fd = -1;
+              
+              // 清空解析状态
+              kvs_resp_reset(c);
+              
+              // 切换到发送状态
+              c->state = ST_SEND;
+              c->wdone = 0;
+              post_send_resp(&g_ring, c);  // 发送响应
+            } else if (n == NEED_STREAMING_RECV) {
+              // 需要流式接收
+              post_recv_frame(&g_ring, c);
+            } else {
+              // 数据不够，继续接收
+              post_recv_frame(&g_ring, c);
+            }
+          }
         }
         break;
       }

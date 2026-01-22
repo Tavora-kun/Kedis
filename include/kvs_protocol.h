@@ -6,6 +6,9 @@
 
 #define PARSE_OK 1
 
+/* ---------------- 返回值定义 ---------------- */
+#define NEED_STREAMING_RECV 2  // 需要流式接收（数据直接写入 seg_buf）
+
 // 从 proactor.c 迁移过来的 RESP 解析核心函数
 // 啃掉 conn->frame 中的数据，填充 conn->argv
 int kvs_resp_feed(struct conn* c);
