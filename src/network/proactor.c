@@ -49,13 +49,6 @@ static void conn_pool_init(struct conn_pool* pool, int max_conns) {
   for (int i = 0; i < max_conns; i++) {
     pool->conns[i].fd = -1;
     pool->conns[i].next_free = i + 1;
-    // 初始化流式接收相关字段
-    pool->conns[i].recv_buffer = NULL;
-    pool->conns[i].recv_buffer_size = 0;
-    pool->conns[i].recv_head = 0;
-    pool->conns[i].recv_tail = 0;
-    pool->conns[i].is_streaming_recv = 0;
-    pool->conns[i].bulk_target = NULL;
   }
   pool->conns[max_conns - 1].next_free = -1;
 
@@ -108,121 +101,22 @@ static void post_accept(struct io_uring* ring, int listenfd) {
   io_uring_sqe_set_data(sqe, dummy);
 }
 
-/* ---------------- 提交异步 close ---------------- */
-static void post_close(struct io_uring* ring, struct conn* c);
-
 /* ---------------- 提交异步 recv ---------------- */
 static void post_recv_frame(struct io_uring* ring, struct conn* c) {
-  // 确定缓冲区和写入位置
-  char* buffer;
-  size_t buffer_size;
-  size_t write_pos;
-  
-  if (c->recv_buffer) {
-    // 使用环形缓冲区
-    buffer = c->recv_buffer;
-    buffer_size = c->recv_buffer_size;
-    write_pos = c->recv_head;
-  } else {
-    // 使用默认 frame 缓冲区
-    buffer = c->frame;
-    buffer_size = IOP_SIZE;
-    write_pos = c->r_len;
+  // 如果 buffer 快满了，移动数据到开头
+  if (c->r_len == IOP_SIZE) {
+    fprintf(stderr, "Buffer full, connection too slow or msg too big\n");
+    // TODO:这里简单处理：关闭连接，或者扩容。
   }
-  
-  // 计算可用空间
-  size_t read_pos = c->recv_buffer ? c->recv_tail : 0;
-  size_t available = (read_pos > write_pos) ? (read_pos - write_pos - 1) : (buffer_size - write_pos + read_pos);
-  
-  // 如果缓冲区满，尝试扩容
-  if (available == 0) {
-    if (c->recv_buffer == NULL) {
-      // 使用默认 frame 时，可以扩容
-      size_t new_size = buffer_size * 2;
-      if (new_size <= 16 * 1024 * 1024) {  // 最大 16MB
-        char* new_buffer = kvs_malloc(new_size);
-        if (new_buffer) {
-          memcpy(new_buffer, buffer, write_pos);
-          kvs_free(c->recv_buffer);  // 如果之前有环形缓冲区，释放它
-          c->recv_buffer = new_buffer;
-          c->recv_buffer_size = new_size;
-          c->recv_head = write_pos;
-          c->recv_tail = 0;
-          buffer = new_buffer;
-          buffer_size = new_size;
-          read_pos = 0;  // 新缓冲区，tail 重置为 0
-          available = buffer_size - 1;
-        } else {
-          fprintf(stderr, "Failed to expand recv buffer, closing connection\n");
-          c->state = ST_CLOSE;
-          post_close(ring, c);
-          return;
-        }
-      } else {
-        fprintf(stderr, "Recv buffer full and cannot expand, closing connection\n");
-        c->state = ST_CLOSE;
-        post_close(ring, c);
-        return;
-      }
-    } else {
-      fprintf(stderr, "Ring buffer full, closing connection\n");
-      c->state = ST_CLOSE;
-      post_close(ring, c);
-      return;
-    }
-  }
-  
-  // 计算本次接收长度
-  size_t recv_len = available;
-  if (c->recv_state == RECV_STATE_BULK_DATA && c->recv_bulk_remaining > 0) {
-    // 优先接收 bulk 数据
-    recv_len = (c->recv_bulk_remaining < available) ? c->recv_bulk_remaining : available;
-  }
-  
-  // 投递接收请求
   struct io_uring_sqe* sqe = sqe_prep(ring, c);
-  io_uring_prep_recv(sqe, c->fd, buffer + write_pos, recv_len, 0);
+  // 从 r_len 处开始接收，最大接收 IOP_SIZE - r_len
+  io_uring_prep_recv(sqe, c->fd, c->frame + c->r_len, IOP_SIZE - c->r_len, 0);
 }
 
 /* ---------------- 提交异步 send：回 RESP 包 ---------------- */
 static void post_send_resp(struct io_uring* ring, struct conn* c) {
   struct io_uring_sqe* sqe = sqe_prep(ring, c);
-
-  // 检查是否启用流式发送
-  if (c->is_streaming) {
-    // 流式发送模式：根据状态机发送对应数据
-    const char* data_ptr = NULL;
-    size_t to_send = 0;
-
-    switch (c->stream_state) {
-      case STREAM_STATE_HEADER:
-        data_ptr = c->stream_header + c->header_sent;
-        to_send = c->header_len - c->header_sent;
-        break;
-
-      case STREAM_STATE_DATA: {
-        size_t remaining = c->stream_total_len - c->stream_sent_len;
-        to_send = (remaining < c->stream_chunk_size) ? remaining : c->stream_chunk_size;
-        data_ptr = c->stream_data + c->stream_sent_len;
-        break;
-      }
-
-      case STREAM_STATE_TAIL:
-        data_ptr = c->stream_tail + c->tail_sent;
-        to_send = 2 - c->tail_sent;  // "\r\n"
-        break;
-
-      default:
-        data_ptr = c->wbuf + c->wdone;
-        to_send = c->wlen - c->wdone;
-        break;
-    }
-
-    io_uring_prep_send(sqe, c->fd, data_ptr, to_send, 0);
-  } else {
-    // 普通模式：发送 wbuf
-    io_uring_prep_send(sqe, c->fd, c->wbuf + c->wdone, c->wlen - c->wdone, 0);
-  }
+  io_uring_prep_send(sqe, c->fd, c->wbuf + c->wdone, c->wlen - c->wdone, 0);
 }
 
 /* ---------------- 提交异步 close ---------------- */
@@ -237,16 +131,6 @@ static void conn_free(struct conn* c) {
     close(c->fd);
   }
 
-  // 释放流式接收资源
-  if (c->recv_buffer) {
-    kvs_free(c->recv_buffer);
-    c->recv_buffer = NULL;
-  }
-  if (c->bulk_target) {
-    kvs_free(c->bulk_target);
-    c->bulk_target = NULL;
-  }
-
   // 释放协议相关资源
   kvs_resp_free_resources(c);
 
@@ -256,196 +140,6 @@ static void conn_free(struct conn* c) {
   }
 
   c->fd = -1;
-}
-
-/* ---------------- 环形缓冲区函数 ---------------- */
-
-// 写入环形缓冲区
-int ring_buffer_write(struct conn* c, const char* data, size_t len) {
-  if (!c || !data || len == 0) {
-    return -1;
-  }
-
-  char* buffer;
-  size_t buffer_size;
-  
-  // 确定缓冲区
-  if (c->recv_buffer) {
-    buffer = c->recv_buffer;
-    buffer_size = c->recv_buffer_size;
-  } else {
-    buffer = c->frame;
-    buffer_size = IOP_SIZE;
-  }
-
-  size_t head = c->recv_head;
-  size_t tail = c->recv_tail;
-
-  // 计算可用空间
-  size_t available = (tail > head) ? (tail - head - 1) : (buffer_size - head + tail);
-
-  if (len > available) {
-    return -1;  // 缓冲区满
-  }
-
-  // 写入数据（可能分两段）
-  size_t first_part = (head + len <= buffer_size) ? len : (buffer_size - head);
-  memcpy(buffer + head, data, first_part);
-  c->recv_head = (head + first_part) % buffer_size;
-
-  if (len > first_part) {
-    size_t second_part = len - first_part;
-    memcpy(buffer, data + first_part, second_part);
-    c->recv_head = (c->recv_head + second_part) % buffer_size;
-  }
-
-  return 0;
-}
-
-// 从环形缓冲区读取数据
-int ring_buffer_read(struct conn* c, char* data, size_t len) {
-  if (!c || !data || len == 0) {
-    return -1;
-  }
-
-  char* buffer;
-  size_t buffer_size;
-  
-  // 确定缓冲区
-  if (c->recv_buffer) {
-    buffer = c->recv_buffer;
-    buffer_size = c->recv_buffer_size;
-  } else {
-    buffer = c->frame;
-    buffer_size = IOP_SIZE;
-  }
-
-  size_t head = c->recv_head;
-  size_t tail = c->recv_tail;
-
-  // 计算可读数据量
-  size_t readable = (head >= tail) ? (head - tail) : (buffer_size - tail + head);
-
-  if (len > readable) {
-    len = readable;  // 只能读取可用的数据
-  }
-
-  if (len == 0) {
-    return 0;  // 缓冲区空
-  }
-
-  // 读取数据（可能分两段）
-  size_t first_part = (tail + len <= buffer_size) ? len : (buffer_size - tail);
-  memcpy(data, buffer + tail, first_part);
-  c->recv_tail = (tail + first_part) % buffer_size;
-
-  if (len > first_part) {
-    size_t second_part = len - first_part;
-    memcpy(data + first_part, buffer, second_part);
-    c->recv_tail = (c->recv_tail + second_part) % buffer_size;
-  }
-
-  return len;
-}
-
-// 从环形缓冲区查看数据但不移动 tail 指针
-int ring_buffer_peek(struct conn* c, char* data, size_t len) {
-  if (!c || !data || len == 0) {
-    return -1;
-  }
-
-  char* buffer;
-  size_t buffer_size;
-  
-  // 确定缓冲区
-  if (c->recv_buffer) {
-    buffer = c->recv_buffer;
-    buffer_size = c->recv_buffer_size;
-  } else {
-    buffer = c->frame;
-    buffer_size = IOP_SIZE;
-  }
-
-  size_t head = c->recv_head;
-  size_t tail = c->recv_tail;
-
-  // 计算可读数据量
-  size_t readable = (head >= tail) ? (head - tail) : (buffer_size - tail + head);
-
-  if (len > readable) {
-    len = readable;  // 只能查看可用的数据
-  }
-
-  if (len == 0) {
-    return 0;  // 缓冲区空
-  }
-
-  // 查看数据（可能分两段）
-  size_t first_part = (tail + len <= buffer_size) ? len : (buffer_size - tail);
-  memcpy(data, buffer + tail, first_part);
-
-  if (len > first_part) {
-    size_t second_part = len - first_part;
-    memcpy(data + first_part, buffer, second_part);
-  }
-
-  return len;
-}
-
-// 跳过环形缓冲区中的数据（移动 tail 指针）
-int ring_buffer_skip(struct conn* c, size_t len) {
-  if (!c || len == 0) {
-    return -1;
-  }
-
-  char* buffer;
-  size_t buffer_size;
-  
-  // 确定缓冲区
-  if (c->recv_buffer) {
-    buffer = c->recv_buffer;
-    buffer_size = c->recv_buffer_size;
-  } else {
-    buffer = c->frame;
-    buffer_size = IOP_SIZE;
-  }
-
-  size_t head = c->recv_head;
-  size_t tail = c->recv_tail;
-
-  // 计算可读数据量
-  size_t readable = (head >= tail) ? (head - tail) : (buffer_size - tail + head);
-
-  if (len > readable) {
-    return -1;  // 不能跳过比可用数据更多的字节
-  }
-
-  c->recv_tail = (tail + len) % buffer_size;
-  return 0;
-}
-
-// 获取环形缓冲区中的可用数据量
-size_t ring_buffer_available(struct conn* c) {
-  if (!c) {
-    return 0;
-  }
-
-  char* buffer;
-  size_t buffer_size;
-  
-  // 确定缓冲区
-  if (c->recv_buffer) {
-    buffer = c->recv_buffer;
-    buffer_size = c->recv_buffer_size;
-  } else {
-    buffer = c->frame;
-    buffer_size = IOP_SIZE;
-  }
-
-  size_t head = c->recv_head;
-  size_t tail = c->recv_tail;
-
-  return (head >= tail) ? (head - tail) : (buffer_size - tail + head);
 }
 
 /* ---------------- 监听端口 ---------------- */
@@ -562,13 +256,7 @@ int proactor_start(unsigned short port, msg_handler handler) {
           conn_pool_free(&g_conn_pool, c);
           break;
         } else if (res > 0) {
-          // 写入环形缓冲区
-          if (ring_buffer_write(c, c->frame, res) < 0) {
-            fprintf(stderr, "Failed to write to ring buffer, closing connection\n");
-            conn_free(c);
-            conn_pool_free(&g_conn_pool, c);
-            break;
-          }
+          c->r_len += res;  // 更新有效数据长度
         }
         
         // resp_feed -> kvs_resp_feed
@@ -598,97 +286,36 @@ int proactor_start(unsigned short port, msg_handler handler) {
 
       // 发我们准备好的数据过去
       case ST_SEND:
-        // 流式发送：更新状态机，普通发送：更新 wdone
-        if (c->is_streaming) {
-          // 更新流式发送状态机
-          switch (c->stream_state) {
-            case STREAM_STATE_HEADER:
-              c->header_sent += res;
-              if (c->header_sent >= (size_t)c->header_len) {
-                c->stream_state = STREAM_STATE_DATA;
-              }
-              break;
+        c->wdone += res;
+        if (c->wdone == c->wlen) {  // 发完
+          c->state = ST_RECV;
 
-            case STREAM_STATE_DATA:
-              c->stream_sent_len += res;
-              if (c->stream_sent_len >= c->stream_total_len) {
-                c->stream_state = STREAM_STATE_TAIL;
-              }
-              break;
-
-            case STREAM_STATE_TAIL:
-              c->tail_sent += res;
-              if (c->tail_sent >= 2) {  // "\r\n" 完成
-                c->stream_state = STREAM_STATE_DONE;
-              }
-              break;
-
-            default:
-              break;
-          }
-
-          // 检查流式发送是否完成
-          if (c->stream_state == STREAM_STATE_DONE) {
-            reset_streaming_send(c);
-            c->state = ST_RECV;
-
-            // 如果有剩余数据，尝试解析下一条
-            if (ring_buffer_available(c) > 0) {
-              int n = kvs_resp_feed(c);
-              if (n == PARSE_OK) {
-                current_processing_fd = c->fd;
-                c->wlen = 0;
-                processCommand(c);
-                current_processing_fd = -1;
-                kvs_resp_reset(c);
-                c->state = ST_SEND;
-                c->wdone = 0;
-                post_send_resp(&g_ring, c);
-              } else if (n < 0) {
-                conn_free(c);
-                conn_pool_free(&g_conn_pool, c);
-              } else {
-                post_recv_frame(&g_ring, c);
-              }
+          // 如果有剩余数据，尝试解析下一条
+          if (c->r_len > 0) {
+            int n = kvs_resp_feed(c);
+            if (n == PARSE_OK) {
+              current_processing_fd = c->fd;
+              c->wlen = 0; // 重置写缓冲区长度
+              processCommand(c);
+              current_processing_fd = -1;
+              kvs_resp_reset(c);
+              c->state = ST_SEND;
+              c->wdone = 0;
+              post_send_resp(&g_ring, c);
+            } else if (n < 0) {
+              conn_free(c);
+              conn_pool_free(&g_conn_pool, c);
             } else {
+              // 依然不够
               post_recv_frame(&g_ring, c);
             }
           } else {
-            // 继续发送剩余的流式数据
-            post_send_resp(&g_ring, c);
+            post_recv_frame(&g_ring, c);  // 准备下一条命令
           }
-          } else {
-            // 普通发送模式：只在非流式时使用
-            c->wdone += res;
-            if (c->wdone >= (size_t)c->wlen) {  // 发完
-              c->state = ST_RECV;
-
-              // 如果有剩余数据，尝试解析下一条
-              if (ring_buffer_available(c) > 0) {
-                int n = kvs_resp_feed(c);
-                if (n == PARSE_OK) {
-                  current_processing_fd = c->fd;
-                  c->wlen = 0;
-                  processCommand(c);
-                  current_processing_fd = -1;
-                  kvs_resp_reset(c);
-                  c->state = ST_SEND;
-                  c->wdone = 0;
-                  post_send_resp(&g_ring, c);
-                } else if (n < 0) {
-                  conn_free(c);
-                  conn_pool_free(&g_conn_pool, c);
-                } else {
-                  post_recv_frame(&g_ring, c);
-                }
-              } else {
-                post_recv_frame(&g_ring, c);
-              }
-            } else {
-              post_send_resp(&g_ring, c);
-            }
-          }
-          break;
+        } else {
+          post_send_resp(&g_ring, c);
+        }
+        break;
       case ST_CLOSE:
         conn_free(c);
         conn_pool_free(&g_conn_pool, c);

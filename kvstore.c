@@ -270,81 +270,6 @@ static void add_reply_exist(struct conn* c, int exists) {
     add_reply_str(c, buf);
 }
 
-/* ---------------- 流式发送相关函数 ---------------- */
-
-// 初始化流式发送状态
-int init_streaming_send(struct conn* c, const char* data, size_t len) {
-    if (c == NULL || data == NULL || len == 0) {
-        return -1;
-    }
-
-    // 设置流式发送标志
-    c->is_streaming = 1;
-    c->stream_state = STREAM_STATE_HEADER;
-    c->stream_data = data;
-    c->stream_total_len = len;
-    c->stream_sent_len = 0;
-    c->stream_chunk_size = IOP_SIZE;  // 128KB
-
-    // 生成头部："$len\r\n"
-    c->header_len = snprintf(c->stream_header, sizeof(c->stream_header), "$%zu\r\n", len);
-    c->header_sent = 0;
-
-    // 设置尾部："\r\n"
-    strcpy(c->stream_tail, "\r\n");
-    c->tail_sent = 0;
-
-    return 0;
-}
-
-// 重置流式发送状态
-extern void reset_streaming_send(struct conn* c) {
-    if (c == NULL) return;
-
-    c->is_streaming = 0;
-    c->stream_state = STREAM_STATE_IDLE;
-    c->stream_data = NULL;
-    c->stream_total_len = 0;
-    c->stream_sent_len = 0;
-    c->stream_chunk_size = 0;
-
-    memset(c->stream_header, 0, sizeof(c->stream_header));
-    c->header_len = 0;
-    c->header_sent = 0;
-
-    memset(c->stream_tail, 0, sizeof(c->stream_tail));
-    c->tail_sent = 0;
-}
-
-// 高层接口：启用流式发送模式发送 bulk string
-static int add_reply_bulk_streaming(struct conn* c, const char* str) {
-    if (c == NULL) {
-        return -1;
-    }
-
-    // 处理 NULL bulk string
-    if (str == NULL) {
-        add_reply_str(c, "$-1\r\n");
-        return 0;
-    }
-
-    // 计算数据长度
-    size_t len = strlen(str);
-
-    // 根据数据大小选择发送方式
-    if (len < STREAMING_THRESHOLD) {
-        // 小数据，使用传统方式
-        add_reply_bulk(c, str);
-    } else {
-        // 大数据，使用流式发送
-        printf("[DEBUG] Using streaming send for %zu bytes\n", len);
-        if (init_streaming_send(c, str, len) < 0) {
-            return -1;
-        }
-    }
-
-    return 0;
-}
 
 /* ---------------- 核心命令执行逻辑 ---------------- */
 int kvs_protocol(struct conn* c) {
@@ -392,7 +317,7 @@ int kvs_protocol(struct conn* c) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
         if (replication_info.is_master) {
-          // appendToAofBufferToEngine(0, AOF_CMD_SET, key, value);
+          appendToAofBufferToEngine(0, AOF_CMD_SET, key, value);
         }
         add_reply_status(c, "OK");
       } else {
@@ -404,7 +329,7 @@ int kvs_protocol(struct conn* c) {
       if (gotValue == NULL) {
         add_reply_error(c, "ERROR / Not Exist"); // Redis style: return nil
       } else {
-        add_reply_bulk_streaming(c, gotValue);
+        add_reply_bulk(c, gotValue);
       }
       break;
     case KVS_CMD_ADEL:
@@ -413,7 +338,7 @@ int kvs_protocol(struct conn* c) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
         if (replication_info.is_master) {
-          // appendToAofBufferToEngine(0, AOF_CMD_DEL, key, NULL);
+          appendToAofBufferToEngine(0, AOF_CMD_DEL, key, NULL);
         }
         add_reply_status(c, "OK");
       } else {
@@ -426,7 +351,7 @@ int kvs_protocol(struct conn* c) {
          add_reply_error(c, "ERROR");
       } else if (ret == 0) {
         if (replication_info.is_master) {
-          // appendToAofBufferToEngine(0, AOF_CMD_MOD, key, value);
+          appendToAofBufferToEngine(0, AOF_CMD_MOD, key, value);
         }
         add_reply_status(c, "OK");
       } else {
@@ -451,7 +376,7 @@ int kvs_protocol(struct conn* c) {
          add_reply_error(c, "ERROR");
       } else if (ret == 0) {
         if (replication_info.is_master) {
-          // appendToAofBufferToEngine(1, AOF_CMD_SET, key, value);
+          appendToAofBufferToEngine(1, AOF_CMD_SET, key, value);
         }
         add_reply_status(c, "OK");
       } else {
@@ -463,7 +388,7 @@ int kvs_protocol(struct conn* c) {
       if (gotValue == NULL) {
         add_reply_error(c, "ERROR / Not Exist");
       } else {
-        add_reply_bulk_streaming(c, gotValue);
+        add_reply_bulk(c, gotValue);
       }
       break;
     case KVS_CMD_HDEL:
@@ -472,7 +397,7 @@ int kvs_protocol(struct conn* c) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
         if (replication_info.is_master) {
-          // appendToAofBufferToEngine(1, AOF_CMD_DEL, key, NULL);
+          appendToAofBufferToEngine(1, AOF_CMD_DEL, key, NULL);
         }
         add_reply_status(c, "OK");
       } else {
@@ -485,7 +410,7 @@ int kvs_protocol(struct conn* c) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
         if (replication_info.is_master) {
-          // appendToAofBufferToEngine(1, AOF_CMD_MOD, key, value);
+          appendToAofBufferToEngine(1, AOF_CMD_MOD, key, value);
         }
         add_reply_status(c, "OK");
       } else {
@@ -510,7 +435,7 @@ int kvs_protocol(struct conn* c) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
         if (replication_info.is_master) {
-          // appendToAofBufferToEngine(2, AOF_CMD_SET, key, value);
+          appendToAofBufferToEngine(2, AOF_CMD_SET, key, value);
         }
         add_reply_status(c, "OK");
       } else {
@@ -522,7 +447,7 @@ int kvs_protocol(struct conn* c) {
       if (gotValue == NULL) {
         add_reply_error(c, "ERROR / Not Exist");
       } else {
-        add_reply_bulk_streaming(c, gotValue);
+        add_reply_bulk(c, gotValue);
       }
       break;
     case KVS_CMD_RDEL:
@@ -531,7 +456,7 @@ int kvs_protocol(struct conn* c) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
         if (replication_info.is_master) {
-          // appendToAofBufferToEngine(2, AOF_CMD_DEL, key, NULL);
+          appendToAofBufferToEngine(2, AOF_CMD_DEL, key, NULL);
         }
         add_reply_status(c, "OK");
       } else {
@@ -544,7 +469,7 @@ int kvs_protocol(struct conn* c) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
         if (replication_info.is_master) {
-          // appendToAofBufferToEngine(2, AOF_CMD_MOD, key, value);
+          appendToAofBufferToEngine(2, AOF_CMD_MOD, key, value);
         }
         add_reply_status(c, "OK");
       } else {
@@ -567,7 +492,7 @@ int kvs_protocol(struct conn* c) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
         if (replication_info.is_master) {
-          // appendToAofBufferToEngine(3, AOF_CMD_SET, key, value);
+          appendToAofBufferToEngine(3, AOF_CMD_SET, key, value);
         }
         add_reply_status(c, "OK");
       } else {
@@ -579,7 +504,7 @@ int kvs_protocol(struct conn* c) {
       if (gotValue == NULL) {
         add_reply_error(c, "ERROR / Not Exist");
       } else {
-        add_reply_bulk_streaming(c, gotValue);
+        add_reply_bulk(c, gotValue);
       }
       break;
     case KVS_CMD_SDEL:
@@ -588,7 +513,7 @@ int kvs_protocol(struct conn* c) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
         if (replication_info.is_master) {
-          // appendToAofBufferToEngine(3, AOF_CMD_DEL, key, NULL);
+          appendToAofBufferToEngine(3, AOF_CMD_DEL, key, NULL);
         }
         add_reply_status(c, "OK");
       } else {
@@ -601,7 +526,7 @@ int kvs_protocol(struct conn* c) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
         if (replication_info.is_master) {
-          // appendToAofBufferToEngine(3, AOF_CMD_MOD, key, value);
+          appendToAofBufferToEngine(3, AOF_CMD_MOD, key, value);
         }
         add_reply_status(c, "OK");
       } else {
@@ -637,7 +562,7 @@ int kvs_protocol(struct conn* c) {
       if (gotValue == NULL) {
         add_reply_error(c, "ERROR / Not Exist");
       } else {
-        add_reply_bulk_streaming(c, gotValue);
+        add_reply_bulk(c, gotValue);
       }
       break;
     case KVS_CMD_DEL:
