@@ -101,18 +101,20 @@ int kvs_resp_feed(struct conn* c) {
 
         long len_val = strtol(p + 1, NULL, 10);
         c->bulk_len = len_val; // 获取到想要的了!
-
+        
         if (len_val < 0) {  // NULL Bulk String ($ -1)
           return -1;
         }
         if (len_val > MAX_SEG_SIZE) return -1; // 超过1GB的 Key 或者 Value,不读
 
         // 分配内存准备接收数据
-        c->seg_buf = kvs_malloc(len_val + 1);  // +1 for null terminator
+        // 预留额外的 2 字节用于流式接收模式下的 \r\n
+        // 格式：[bulk_data(len_val bytes)] + [\r\n(2 bytes)] + [\0(1 byte)]
+        c->seg_buf = kvs_malloc(len_val + 3);  // +2 for \r\n, +1 for null terminator
         if (!c->seg_buf) {
           return -1;  // 内存分配失败
         }
-        c->seg_buf[len_val] = '\0';
+        c->seg_buf[len_val] = '\0';  // 初始 null terminator 在 bulk_len 位置
         c->seg_used = 0;
 
         c->resp_state = ST_RESP_BULK_DATA;
@@ -141,10 +143,15 @@ int kvs_resp_feed(struct conn* c) {
         // 检查 bulk data 是否收全
         if (c->seg_used == (size_t)c->bulk_len) {
           // bulk data 收全了，现在检查 \r\n
+          fprintf(stderr, "c->seg_used == %zu\n", c->seg_used);
+          
+          // 确保 seg_buf 正确终止（防止 strlen 计算出错误的长度）
+          c->seg_buf[c->seg_used] = '\0';
           
           // 检查 frame 中是否有足够的数据接收 \r\n
           if (done + 2 > len) {
             // frame 中的数据已经处理完了，但还没收到 \r\n
+            fprintf(stderr, "Hello World2\n");
             
             // 移除 frame 中已处理的数据
             int left = len - done;
@@ -152,6 +159,7 @@ int kvs_resp_feed(struct conn* c) {
               memmove(c->frame, c->frame + done, left);
             }
             c->r_len = left;
+
             
             // 设置流式接收状态
             c->streaming_recv = 1;           // 进入流式模式
@@ -168,6 +176,9 @@ int kvs_resp_feed(struct conn* c) {
           }
           done += 2;
           
+
+          fprintf(stderr, "FINAL: c->argc == %d\n", c->argc);
+          fprintf(stderr, "FINAL: c->bulk_len == %ld\n", c->bulk_len);
           // 参数完整，存入 argv
           c->argv[c->argc++] = (robj){c->seg_buf, c->bulk_len};
           c->seg_buf = NULL;  // 权责移交，argv 负责 seg_buf 的内存
@@ -190,7 +201,7 @@ int kvs_resp_feed(struct conn* c) {
           }
         } else {
           // bulk data 没收全，且 frame 中的数据已经处理完了
-          
+          fprintf(stderr, "stream\n");
           // 移除 frame 中已处理的数据
           int left = len - done;
           if (left > 0 && done > 0) {

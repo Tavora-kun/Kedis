@@ -257,7 +257,7 @@ static void add_reply_bulk(struct conn* c, const char* str) {
     
     // 计算数据的长度
     size_t len = strlen(str);
-    
+    // fprintf(stderr, "---> len = %zu\n", len);
     // 计算响应数据的总长度
     // 格式：$<len>\r\n<data>\r\n
     // 长度：1 ($) + 数字位数 + 2 (\r\n) + len + 2 (\r\n)
@@ -358,6 +358,7 @@ int kvs_protocol(struct conn* c) {
       break;
     case KVS_CMD_AGET:
       gotValue = kvs_array_get(&array_engine, key);
+      fprintf(stderr, "--> gotValue:\n%s", gotValue);
       if (gotValue == NULL) {
         add_reply_error(c, "ERROR / Not Exist"); // Redis style: return nil
       } else {
@@ -672,6 +673,7 @@ int kvs_protocol(struct conn* c) {
   check_and_perform_autosave();
   pthread_mutex_unlock(&global_kvs_lock);  // UNLOCK
   
+  fprintf(stderr, "c->wlen == %d\n", c->wlen);
   return c->wlen;
 }
 

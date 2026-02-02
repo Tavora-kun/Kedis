@@ -5,9 +5,9 @@
 #include "kvs_constants.h"
 
 /* ---------------- 常量定义 ---------------- */
-#define IOP_SIZE (16 * 1024)               // 每次 recv/send 的帧大小（16 KB）
-#define MAX_ARGC 64                        // 最大参数个数
-#define RESP_BUF_SIZE (64 * 1024)          // 响应缓冲区大小
+#define IOP_SIZE (44)               // 每次 recv/send 的帧大小（16 KB）
+#define MAX_ARGC (64)                        // 最大参数个数
+#define RESP_BUF_SIZE (100)          // 响应缓冲区大小
 #define MAX_SEG_SIZE (1024 * 1024 * 1024)  // 单段最大 1 GB
 
 /* ---------------- 连接状态机 ---------------- */
@@ -57,6 +57,7 @@ struct conn {
                                 // 例如：bulk_len = 4MB，seg_used = 1MB，则 remaining_bulk_len = 3MB
   int need_crlf;               // 标记是否还需要接收 \r\n（0: 不需要，1: 需要）
                                 // RESP 协议要求 bulk data 后面必须有 \r\n
+  char crlf_buf[2];            // 临时缓冲区，用于接收 \r\n（不存储到 seg_buf 中）
 
   /* ---- 写回 ---- */
   char* wbuf;       // 回包缓冲（+OK\r\n 或 $len\r\n...）

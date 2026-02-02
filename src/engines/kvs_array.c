@@ -62,6 +62,9 @@ int kvs_array_set(kvs_array_t* inst, char* key, char* value) {
   size_t klen = strlen(key);
   size_t vlen = strlen(value);
 
+  //[DEBUG]
+  fprintf(stderr, "%zu\n", vlen);
+
   char* tmpKey = kvs_calloc(1, klen + 1);
   if (tmpKey == NULL) return -3;
   memcpy(tmpKey, key, klen + 1);   // 包含 \0

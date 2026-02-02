@@ -86,7 +86,10 @@ void run_tests(int connfd);
 
 // 持久化测试: testcase_persistence.c
 void test_ksf_persistence(int connfd, const engine_ops_t* engine);
-void test_aof_persistence(int connfd, const engine_ops_t* engine);  
+void test_aof_persistence(int connfd, const engine_ops_t* engine);
+void test_ksf_load(int connfd, const engine_ops_t* engine);
+void test_aof_load_mod(int connfd, const engine_ops_t* engine);
+void test_aof_load_del(int connfd, const engine_ops_t* engine);
 void test_persistence_load(int connfd, const engine_ops_t* engine, const char* test_type);
   
 #endif

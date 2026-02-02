@@ -124,9 +124,9 @@ static void post_recv_frame(struct io_uring* ring, struct conn* c) {
                          c->remaining_bulk_len, 0);
     } else if (c->need_crlf) {
       // bulk data 已经收全，现在需要接收 \r\n
-      // \r\n 接收到 seg_buf 的末尾（预留了 2 字节空间）
+      // \r\n 接收到临时缓冲区 crlf_buf（不存储到 seg_buf 中）
       io_uring_prep_recv(sqe, c->fd, 
-                         c->seg_buf + c->bulk_len, 2, 0);
+                         c->crlf_buf, 2, 0);
     }
   } else {
     // 正常模式：数据先进入 frame
