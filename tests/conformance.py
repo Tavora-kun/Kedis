@@ -16,11 +16,19 @@ class TestPair:
     name: str
     key_expr: str
     value_expr: str
+    mod_value_expr: str = ""  # 修改后的值表达式
     engine_cmds: Dict[str, Dict[str, str]] = field(default_factory=dict)
     
     def get_cmd_for_engine(self, engine: str, phase: str) -> str:
-        default_cmd = 'SET' if phase == 'set' else 'GET'
-        cmd = self.engine_cmds.get(engine, {}).get(phase, default_cmd)
+        # 默认命令映射
+        default_map = {
+            'set': 'SET',
+            'get': 'GET',
+            'mod': 'MOD',
+            'get_mod': 'GET',
+            'del': 'DEL'
+        }
+        cmd = self.engine_cmds.get(engine, {}).get(phase, default_map.get(phase, 'GET'))
         return f"{engine}{cmd}"
 
 
@@ -49,21 +57,22 @@ class ConformanceTest:
         print(f"工作目录: {self.work_dir}")
         print(f"引擎: {', '.join(ENGINES)}")
     
-    def add_pair(self, name: str, key_expr: str, value_expr: str,
+    def add_pair(self, name: str, key_expr: str, value_expr: str, mod_value_expr: str = "",
                  engine_cmds: Optional[Dict[str, Dict[str, str]]] = None) -> None:
         self.test_pairs.append(TestPair(
             name=name, key_expr=key_expr, value_expr=value_expr,
+            mod_value_expr=mod_value_expr,
             engine_cmds=engine_cmds or {}
         ))
     
     def load_default_tests(self) -> None:
         self.test_pairs = [
-            TestPair('small_string', '"k1"', '"v1"'),
-            TestPair('large_string', '"large_key"', '"x" * 10000'),
-            TestPair('unicode', '"中文key"', '"中文value 🎉"'),
-            TestPair('number_value', '"num_key"', '12345'),
-            TestPair('special_chars', '"spec:key"', '"val\\r\\nwith\\nlines"'),
-            TestPair('huge_key', '"k" * 1000', '"huge_key_test"'),
+            TestPair('small_string', '"k1"', '"v1"', '"v1_mod"'),
+            TestPair('large_string', '"large_key"', '"x" * 10000', '"y" * 10000'),
+            TestPair('unicode', '"中文key"', '"中文value 🎉"', '"修改后的中文 🎉"'),
+            TestPair('number_value', '"num_key"', '12345', '99999'),
+            TestPair('special_chars', '"spec:key"', '"val\\r\\nwith\\nlines"', '"new\\r\\nval"'),
+            TestPair('huge_key', '"k" * 1000', '"huge_key_test"', '"huge_key_mod"'),
         ]
         print(f"已加载 {len(self.test_pairs)} 个默认测试对")
     
@@ -115,6 +124,7 @@ class ConformanceTest:
                     name=t['name'],
                     key_expr=t['key_expr'],
                     value_expr=t['value_expr'],
+                    mod_value_expr=t.get('mod_value_expr', ""),
                     engine_cmds=t.get('engine_cmds', {})
                 ))
             
@@ -136,32 +146,41 @@ class ConformanceTest:
                               phase: str, port: int) -> tuple[bool, Optional[str], Any]:
         """执行单引擎，返回(成功, 错误信息, 原始响应)"""
         key = to_redis_str(self._eval_expr(pair.key_expr))
-        value = to_redis_str(self._eval_expr(pair.value_expr))
-        cmd = pair.get_cmd_for_engine(engine, phase)
+        # 根据阶段决定期望值
+        target_val_expr = pair.mod_value_expr if phase == 'get_mod' else pair.value_expr
+        expected_value = to_redis_str(self._eval_expr(target_val_expr))
         
+        cmd = pair.get_cmd_for_engine(engine, phase)
         client = RawRedisClient(self.host, port)
+        
         try:
             client.connect()
             
-            if phase == 'set':
-                resp = client.execute(cmd, key, value)
-                if resp is None:
-                    return False, "无响应", None
-                if resp[0] == 'error':
-                    return False, resp[1], resp
-                return resp[0] in ('simple_string', 'integer'), None, resp
-            else:
+            if phase == 'set' or phase == 'mod':
+                val_expr = pair.value_expr if phase == 'set' else pair.mod_value_expr
+                val = to_redis_str(self._eval_expr(val_expr))
+                resp = client.execute(cmd, key, val)
+                if resp is None: return False, "无响应", None
+                if resp[0] == 'error': return False, resp[1], resp
+                # MOD和SET成功都应返回 simple_string (+)
+                return resp[0] == 'simple_string', None, resp
+                
+            elif phase == 'del':
                 resp = client.execute(cmd, key)
-                if resp is None:
-                    return False, "无响应", None
-                if resp[0] == 'error':
-                    return False, resp[1], resp
+                if resp is None: return False, "无响应", None
+                if resp[0] == 'error': return False, resp[1], resp
+                return resp[0] == 'simple_string', None, resp
+                
+            else: # get 或 get_mod
+                resp = client.execute(cmd, key)
+                if resp is None: return False, "无响应", None
+                if resp[0] == 'error': return False, resp[1], resp
                 if resp[0] == 'bulk_string':
                     got = resp[1] if resp[1] is not None else ""
-                    if got == value:
+                    if got == expected_value:
                         return True, None, resp
-                    return False, f"值不匹配", resp
-                return False, f"意外响应:{resp[0]}", resp
+                    return False, f"值不匹配 (期望: {format_value(expected_value)}, 实际: {format_value(got)})", resp
+                return False, f"意外响应类型: {resp[0]}", resp
         except Exception as e:
             return False, str(e), None
         finally:
@@ -221,11 +240,14 @@ class ConformanceTest:
         while True:
             print(f"\n{'='*50}")
             print("主菜单:")
-            print("  [1] SET阶段 (所有引擎写入)")
-            print("  [2] GET阶段 (所有引擎读取)")
-            print("  [3] 查看测试对")
-            print("  [4] 添加测试对")
-            print("  [5] 保存测试对到 JSON")
+            print("  [1] SET阶段 (批量写入初始值)")
+            print("  [2] GET阶段 (批量验证初始值)")
+            print("  [3] MOD阶段 (批量修改值)")
+            print("  [4] GET_MOD阶段 (批量验证修改后的值)")
+            print("  [5] DEL阶段 (批量删除)")
+            print("  [6] 查看测试对")
+            print("  [7] 添加测试对")
+            print("  [8] 保存测试对到 JSON")
             print("  [q] 退出")
             
             cmd = input("\n选择: ").strip().lower()
@@ -237,10 +259,19 @@ class ConformanceTest:
                 port = int(input("端口号: "))
                 self.run_phase('get', port)
             elif cmd == '3':
-                self._show_test_pairs()
+                port = int(input("端口号: "))
+                self.run_phase('mod', port)
             elif cmd == '4':
-                self._manual_add_one_pair()
+                port = int(input("端口号: "))
+                self.run_phase('get_mod', port)
             elif cmd == '5':
+                port = int(input("端口号: "))
+                self.run_phase('del', port)
+            elif cmd == '6':
+                self._show_test_pairs()
+            elif cmd == '7':
+                self._manual_add_one_pair()
+            elif cmd == '8':
                 filename = input("保存文件名: ").strip()
                 if filename:
                     self.save_to_json(filename)
@@ -250,64 +281,41 @@ class ConformanceTest:
                 print("退出")
                 break
     
+    def _get_valid_expr(self, prompt: str) -> str:
+        while True:
+            expr = input(prompt).strip()
+            try:
+                eval(expr, {"__builtins__": {}}, {})
+                return expr
+            except Exception as e:
+                print(f"  [错误] 表达式无效: {e}, 请重新输入")
+
     def _manual_add_pairs(self) -> None:
       print("\n添加测试对 (空名称结束)")
       while True:
           name = input("名称: ").strip()
           if not name:
               break
-        
-          # 验证 key 表达式
-          while True:
-              key_expr = input("key: ").strip()
-              try:
-                  test_key = eval(key_expr, {"__builtins__": {}}, {})
-                  break  # 成功则退出循环
-              except Exception as e:
-                  print(f"  [错误] {e}, 请重新输入")
-          
-          # 验证 value 表达式
-          while True:
-              value_expr = input("value: ").strip()
-              try:
-                  test_val = eval(value_expr, {"__builtins__": {}}, {})
-                  break  # 成功则退出循环
-              except Exception as e:
-                  print(f"  [错误] {e}, 请重新输入")
-          
-          self.add_pair(name, key_expr, value_expr)
+          key_expr = self._get_valid_expr("key: ")
+          value_expr = self._get_valid_expr("初始 value: ")
+          mod_expr = self._get_valid_expr("修改后 value: ")
+          self.add_pair(name, key_expr, value_expr, mod_expr)
           print(f"已添加: {name}")
     
     def _manual_add_one_pair(self) -> None:
         name = input("名称: ").strip()
         if not name:
             return
-        
-        # 验证 key 表达式
-        while True:
-            key_expr = input("key: ").strip()
-            try:
-                test_key = eval(key_expr, {"__builtins__": {}}, {})
-                break
-            except Exception as e:
-                print(f"  [错误] {e}, 请重新输入")
-        
-        # 验证 value 表达式
-        while True:
-            value_expr = input("value: ").strip()
-            try:
-                test_val = eval(value_expr, {"__builtins__": {}}, {})
-                break
-            except Exception as e:
-                print(f"  [错误] {e}, 请重新输入")
-        
-        self.add_pair(name, key_expr, value_expr)
+        key_expr = self._get_valid_expr("key: ")
+        value_expr = self._get_valid_expr("初始 value: ")
+        mod_expr = self._get_valid_expr("修改后 value: ")
+        self.add_pair(name, key_expr, value_expr, mod_expr)
         print(f"已添加: {name}")
     
     def _show_test_pairs(self) -> None:
         print(f"\n共 {len(self.test_pairs)} 个测试对:")
         for i, p in enumerate(self.test_pairs, 1):
-            print(f"  {i}. {p.name}: {p.key_expr} = {p.value_expr}")
+            print(f"  {i}. {p.name}: {p.key_expr} = {p.value_expr} (Mod: {p.mod_value_expr})")
 
 
 if __name__ == "__main__":
