@@ -649,7 +649,7 @@ int kvs_protocol(struct conn* c) {
 
 int init_kvengine(void) {
   // 初始化内存池，针对KV存储的典型数据大小进行优化
-  g_mem_pool = mem_pool_init(BLOCK_SIZE);
+  g_mem_pool = mem_pool_init(MEM_BLOCK_SIZE);
   // fprintf(stderr, "-1-->\n");
   #if ENABLE_MULTI_ENGINE
   // 多引擎模式：初始化所有启用的引擎

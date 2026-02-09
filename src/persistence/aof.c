@@ -334,11 +334,9 @@ static int aofLoadToEngine_mmap(const char* filename, int engine_type) {
   while (pos < ctx.file_size) {
     // 步骤 6.1：读取命令码（1 字节）
     // 检查是否还有数据可读
-    if (pos >= ctx.file_size) break;
-
     // 从映射内存中读取 1 字节的命令码
     uint8_t cmd_type = (uint8_t)data[pos++];
-
+    // fprintf(stderr, "读取到的命令码: %02X\n", cmd_type);
     // 步骤 6.2：解码键长度（VLQ 格式）
     // 检查是否还有数据可读
     if (pos >= ctx.file_size) break;
@@ -351,6 +349,7 @@ static int aofLoadToEngine_mmap(const char* filename, int engine_type) {
     // 返回值：VLQ 编码占用的字节数
     int key_len_bytes = decode_vlq((const uint8_t*)(data + pos), &key_len);
 
+    // fprintf(stderr, "decode: key_len: %zu\n", key_len);
     // 更新解析位置，跳过 VLQ 编码的字节
     pos += key_len_bytes;
 
@@ -363,6 +362,7 @@ static int aofLoadToEngine_mmap(const char* filename, int engine_type) {
 
     // 调用 decode_vlq() 解码值长度
     int val_len_bytes = decode_vlq((const uint8_t*)(data + pos), &val_len);
+    // fprintf(stderr, "decode: val_len: %zu\n", val_len);
 
     // 更新解析位置，跳过 VLQ 编码的字节
     pos += val_len_bytes;
@@ -370,7 +370,7 @@ static int aofLoadToEngine_mmap(const char* filename, int engine_type) {
     // 步骤 6.4：检查边界条件
     // 计算 key 和 value 占用的总字节数
     // 如果 pos + key_len + val_len 超过文件大小，说明文件格式错误
-    if (pos + key_len + val_len > ctx.file_size) {
+    if (pos + key_len + val_len + 2 > ctx.file_size) {
       // 打印错误信息
       fprintf(stderr, "错误：AOF 文件格式错误（超出文件边界）\n");
 
@@ -385,22 +385,21 @@ static int aofLoadToEngine_mmap(const char* filename, int engine_type) {
     // key_ptr 指向映射内存中 key 的起始位置
     robj key = {0};
     key.ptr = (key_len > 0) ? (data + pos) : NULL;
-    key.len = (key_len > 0) ? (key_len - 1) : 0;
+    key.len = (key_len > 0) ? key_len : 0;
     // 更新解析位置，跳过 key 的内容
-    pos += key_len;
+    pos += key_len + 1; // 还需要跳过 \0
 
     // val_ptr 指向映射内存中 value 的起始位置
     robj value = {0};
     value.ptr = (val_len > 0) ? (data + pos) : NULL;
-    value.len = (val_len > 0) ? (val_len - 1) : 0;
+    value.len = (val_len > 0) ? val_len : 0;
 
     // 更新解析位置，跳过 value 的内容
-    pos += val_len;
+    pos += val_len + 1; // 还需要跳过 \0
 
     // 步骤 6.6：根据命令类型执行相应的操作
     // 直接传递映射内存中的指针，引擎内部会分配内存并拷贝数据
     // 这样实现了真正的零拷贝，并且支持任意大小的数据（4MB+）
-    int result = 0;  // 用于存储操作结果
 
     // 使用 switch 语句处理不同的命令类型
     switch (cmd_type) {
@@ -503,7 +502,7 @@ static int aofLoadToEngine_mmap(const char* filename, int engine_type) {
       // 处理未知命令类型
       default:
         // 打印错误信息，显示未知的命令类型
-        fprintf(stderr, "未知的 AOF 命令类型: %d\n", cmd_type);
+        fprintf(stderr, "未知的 AOF 命令类型: %02X\n", cmd_type);
         break;  // 退出 switch
     }
 
@@ -931,7 +930,7 @@ static int aofLoadToEngine(const char* filename, int engine_type) {
     // 读取键内容
     if (pos + key_len > file_size) break;
     robj key = {0};
-    key.len = (key_len > 0) ? (key_len - 1) : 0;
+    key.len = (key_len > 0) ? (key_len) : 0;
     if (key_len > 0) {
       key.ptr = (char*)kvs_malloc(key_len);
       if (!key.ptr) {
@@ -939,14 +938,13 @@ static int aofLoadToEngine(const char* filename, int engine_type) {
         kvs_free(buffer);
         return -1;
       }
-      memcpy(key.ptr, buffer + pos, key_len);
-      // key.ptr[key_len] = '\0';
-      pos += key_len;
+      memcpy(key.ptr, buffer + pos, key_len + 1);
+      pos += key_len + 1;
     }
 
     // 读取值内容
     robj value = {0};
-    value.len = (val_len > 0) ? (val_len - 1) : 0;
+    value.len = (val_len > 0) ? (val_len) : 0;
     if (val_len > 0) {
       if (pos + val_len > file_size) {
         if (key.ptr) kvs_free(key.ptr);
@@ -960,9 +958,8 @@ static int aofLoadToEngine(const char* filename, int engine_type) {
         kvs_free(buffer);
         return -1;
       }
-      memcpy(value.ptr, buffer + pos, val_len);
-      // value[val_len] = '\0';
-      pos += val_len;
+      memcpy(value.ptr, buffer + pos, val_len + 1);
+      pos += val_len + 1;
     }
 
     // 根据引擎类型和命令类型执行相应的操作
@@ -1252,39 +1249,39 @@ void appendToAofBufferToEngine(int engine_type, int type, const robj* key,
     // 释放堆上分配的缓冲区
     kvs_free(cmd_data);
     return;
-  }
+  } else {
 
-  // 小命令：尝试追加到缓冲区
-  if (aofBuffer[engine_type].len + total_needed > AOF_BUF_SIZE) {
-    flushAofBufferToEngine(engine_type);  // 缓冲区满，先flush
-  }
-
-  // 添加命令码（1字节）
-  aof_buf[aofBuffer[engine_type].len++] = (uint8_t)type;
-
-  // 添加键长度（VLQ编码）
-  memcpy(aof_buf + aofBuffer[engine_type].len, vlq, key_len_bytes);
-  aofBuffer[engine_type].len += key_len_bytes;
-
-  // 添加值长度（VLQ编码）
-  memcpy(aof_buf + aofBuffer[engine_type].len, vlq + key_len_bytes,
-         val_len_bytes);
-  aofBuffer[engine_type].len += val_len_bytes;
-
-  // 添加键内容
-  if (klen > 0) {
-    memcpy(aof_buf + aofBuffer[engine_type].len, key->ptr, klen);
-    aofBuffer[engine_type].len += klen;
-    aof_buf[aofBuffer[engine_type].len] = '\0';
-    aofBuffer[engine_type].len++;
-  }
+    // [小命令]: 尝试追加到缓冲区
+    if (aofBuffer[engine_type].len + total_needed > AOF_BUF_SIZE) {
+      flushAofBufferToEngine(engine_type);  // 缓冲区满，先flush
+    }
   
-  // 添加值内容
-  if (vlen > 0) {
-    memcpy(aof_buf + aofBuffer[engine_type].len, value->ptr, vlen);
-    aofBuffer[engine_type].len += vlen;
-    aof_buf[aofBuffer[engine_type].len] = '\0';
-    aofBuffer[engine_type].len++;
+    // 添加命令码（1字节）
+    aof_buf[aofBuffer[engine_type].len++] = (uint8_t)type;
+  
+    // 添加键长度（VLQ编码）
+    memcpy(aof_buf + aofBuffer[engine_type].len, vlq, key_len_bytes);
+    aofBuffer[engine_type].len += key_len_bytes;
+  
+    // 添加值长度（VLQ编码）
+    memcpy(aof_buf + aofBuffer[engine_type].len, vlq + key_len_bytes,
+           val_len_bytes);
+    aofBuffer[engine_type].len += val_len_bytes;
+  
+    // 添加键内容
+    if (klen > 0) {
+      memcpy(aof_buf + aofBuffer[engine_type].len, key->ptr, klen);
+      aofBuffer[engine_type].len += klen;
+      aof_buf[aofBuffer[engine_type].len] = '\0';
+      aofBuffer[engine_type].len++;
+    }
+    
+    // 添加值内容
+    if (vlen > 0) {
+      memcpy(aof_buf + aofBuffer[engine_type].len, value->ptr, vlen);
+      aofBuffer[engine_type].len += vlen;
+      aof_buf[aofBuffer[engine_type].len] = '\0';
+      aofBuffer[engine_type].len++;
+    }
   }
-  // printf("-->aof end\n");
 }
