@@ -3,6 +3,13 @@
 
 #include "kvs_constants.h"
 
+#define ENABLE_AOF 0
+
+typedef struct {
+  char buf[AOF_BUF_SIZE];
+  int len;
+} aof_buf_t;
+
 // AOF相关函数声明
 void appendToAofBuffer(int type, const robj* key, const robj* value);  // 添加到AOF缓冲区
 int flushAofBuffer(void);  // 刷新AOF缓冲区
@@ -18,8 +25,5 @@ void appendToAofBufferToEngine(int engine_type, int type, const robj* key, const
 
 // mmap 优化版本
 int aofLoadAll_mmap(void);  // 使用 mmap 加载所有 AOF 文件
-
-// mmap 持久化落盘的核心函数 (demo_mmap.c)
-// int mmap_append(int fd, const char* filename, char *data, size_t n);
 
 #endif // __KVS_AOF_H__

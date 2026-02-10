@@ -116,8 +116,8 @@ aof_buf_t aofBuffer[4] = {0};
 #else
 aof_buf_t aofBuffer = {0};
 #endif
-
 extern const char* aof_filename;
+
 const char* snap_filename = "./data/dump.ksf";
 
 // 不直接使用系统调用(第三方接口)
@@ -298,19 +298,6 @@ static void add_reply_exist(struct conn* c, int exists) {
 
 /* ---------------- 核心命令执行逻辑 ---------------- */
 int kvs_protocol(struct conn* c) {
-  // pthread_mutex_lock(&global_kvs_lock);  // LOCK
-
-  // if (c->argc == 0) {
-  //   pthread_mutex_unlock(&global_kvs_lock);
-  //   return 0;
-  // }
-
-  // 提取命令参数
-  // 注意：c->argv[i].ptr 已经是 null-terminated 的字符串 (我们在 kvs_resp_feed 里保证了)
-  // char* cmd_name = c->argv[0].ptr;
-  // char* key = (c->argc > 1) ? c->argv[1].ptr : NULL;
-  // char* value = (c->argc > 2) ? c->argv[2].ptr : NULL;
-  
   
   char* cmd_name = c->argv[0].ptr;
   robj* key = &c->argv[1];
@@ -324,17 +311,6 @@ int kvs_protocol(struct conn* c) {
     }
   }
 
-  // // SLAVE READ-ONLY CHECK
-  // if (!replication_info.is_master) {
-  //   if (is_write_command(cmd_name)) {
-  //     if (current_processing_fd != slave_info.master_fd) {
-  //       add_reply_error(c, "READONLY You can't write against a read only replica");
-  //       pthread_mutex_unlock(&global_kvs_lock);
-  //       return c->wlen;
-  //     }
-  //   }
-  // }
-
   int ret = 0;
   char* gotValue = NULL;
 
@@ -346,7 +322,10 @@ int kvs_protocol(struct conn* c) {
       if (ret < 0) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
+
+        #if ENABLE_AOF
         appendToAofBufferToEngine(0, AOF_CMD_SET, key, value);
+        #endif
         add_reply_status(c, "OK");
       } else {
          add_reply_error(c, "Key has existed");
@@ -366,7 +345,9 @@ int kvs_protocol(struct conn* c) {
       if (ret < 0) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
+        #if ENABLE_AOF
         appendToAofBufferToEngine(0, AOF_CMD_DEL, key, NULL);
+        #endif
         add_reply_status(c, "OK");
       } else {
         add_reply_error(c, "ERROR / Not Exist");
@@ -377,7 +358,9 @@ int kvs_protocol(struct conn* c) {
       if (ret < 0) {
          add_reply_error(c, "ERROR");
       } else if (ret == 0) {
+        #if ENABLE_AOF
         appendToAofBufferToEngine(0, AOF_CMD_MOD, key, value);
+        #endif
         add_reply_status(c, "OK");
       } else {
         add_reply_error(c, "Not Exist");
@@ -400,7 +383,9 @@ int kvs_protocol(struct conn* c) {
       if (ret < 0) {
          add_reply_error(c, "ERROR");
       } else if (ret == 0) {
+        #if ENABLE_AOF
         appendToAofBufferToEngine(1, AOF_CMD_SET, key, value);
+        #endif
         add_reply_status(c, "OK");
       } else {
         add_reply_error(c, "Key has existed");
@@ -419,7 +404,9 @@ int kvs_protocol(struct conn* c) {
       if (ret < 0) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
+        #if ENABLE_AOF
         appendToAofBufferToEngine(1, AOF_CMD_DEL, key, NULL);
+        #endif
         add_reply_status(c, "OK");
       } else {
         add_reply_error(c, "ERROR / Not Exist");
@@ -430,7 +417,9 @@ int kvs_protocol(struct conn* c) {
       if (ret < 0) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
+        #if ENABLE_AOF
         appendToAofBufferToEngine(1, AOF_CMD_MOD, key, value);
+        #endif
         add_reply_status(c, "OK");
       } else {
         add_reply_error(c, "Not Exist");
@@ -453,7 +442,9 @@ int kvs_protocol(struct conn* c) {
       if (ret < 0) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
+        #if ENABLE_AOF
         appendToAofBufferToEngine(2, AOF_CMD_SET, key, value);
+        #endif
         add_reply_status(c, "OK");
       } else {
         add_reply_error(c, "Key has existed");
@@ -472,7 +463,9 @@ int kvs_protocol(struct conn* c) {
       if (ret < 0) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
+        #if ENABLE_AOF
         appendToAofBufferToEngine(2, AOF_CMD_DEL, key, NULL);
+        #endif
         add_reply_status(c, "OK");
       } else {
         add_reply_error(c, "ERROR / Not Exist");
@@ -483,7 +476,9 @@ int kvs_protocol(struct conn* c) {
       if (ret < 0) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
+        #if ENABLE_AOF
         appendToAofBufferToEngine(2, AOF_CMD_MOD, key, value);
+        #endif
         add_reply_status(c, "OK");
       } else {
         add_reply_error(c, "Not Exist");
@@ -504,7 +499,9 @@ int kvs_protocol(struct conn* c) {
       if (ret < 0) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
+        #if ENABLE_AOF
         appendToAofBufferToEngine(3, AOF_CMD_SET, key, value);
+        #endif
         add_reply_status(c, "OK");
       } else {
         add_reply_error(c, "Key has existed");
@@ -523,7 +520,9 @@ int kvs_protocol(struct conn* c) {
       if (ret < 0) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
+        #if ENABLE_AOF
         appendToAofBufferToEngine(3, AOF_CMD_DEL, key, NULL);
+        #endif
         add_reply_status(c, "OK");
       } else {
         add_reply_error(c, "ERROR / Not Exist");
@@ -534,7 +533,9 @@ int kvs_protocol(struct conn* c) {
       if (ret < 0) {
         add_reply_error(c, "ERROR");
       } else if (ret == 0) {
+        #if ENABLE_AOF
         appendToAofBufferToEngine(3, AOF_CMD_MOD, key, value);
+        #endif
         add_reply_status(c, "OK");
       } else {
         add_reply_error(c, "Not Exist");
@@ -725,17 +726,9 @@ int main(int argc, char* argv[]) {
   }
 
   int port = atoi(argv[1]);
-  // char* master_ip = NULL;
-  // int master_port = 0;
 
-  // Arg parsing
   for (int i = 2; i < argc; i++) {
-    // if (strcmp(argv[i], "--slaveof") == 0) {
-    //   if (i + 2 < argc) {
-    //     master_ip = argv[i + 1];
-    //     master_port = atoi(argv[i + 2]);
-    //     i += 2;
-    //   }
+
     if (strcmp(argv[i], "aof") == 0) {
       load_mode = INIT_LOAD_AOF;
     } else if (strcmp(argv[i], "snap") == 0) {
@@ -753,16 +746,6 @@ int main(int argc, char* argv[]) {
 
   init_kvengine();
 
-  // if (master_ip != NULL) {
-  //   // SLAVE MODE
-  //   printf("Starting as SLAVE. Syncing with Master %s:%d...\n", master_ip,
-  //          master_port);
-  //   // if (init_slave_replication(master_ip, master_port) != 0) {
-  //   //   fprintf(stderr, "Failed to sync with master. Exiting.\n");
-  //   //   return -1;
-  //   // }
-  // } else {
-  //   // MASTER MODE
     if (load_mode == INIT_LOAD_AOF) {
 #if ENABLE_MULTI_ENGINE
     #if ENABLE_MMAP
@@ -788,7 +771,10 @@ int main(int argc, char* argv[]) {
     }
   // }
 
+
+#if ENABLE_AOF
   start_aof_fsync_process();
+#endif
 
 #if (NETWORK_SELECT == NETWORK_REACTOR)
   reactor_start(port, kvs_protocol);  //
