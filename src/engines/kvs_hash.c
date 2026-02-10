@@ -428,11 +428,7 @@ int kvs_hash_resize(hashtable_t *hash, int new_size) {
 		while (node != NULL) {
 			hashnode_t *next = node->next;
 
-      // 临时方案, 这里必须要调strlen了
-      robj* node_key_robj = NULL;
-      node_key_robj->ptr = node->key;
-      node_key_robj->len = strlen(node->key);
-			int new_idx = _hash(node_key_robj, new_size);
+			int new_idx = murmurhash3_32(node->key, strlen(node->key)) % new_size;
 
 			node->next = new_nodes[new_idx];
 			new_nodes[new_idx] = node;
@@ -555,11 +551,7 @@ int kvs_hash_step_rehash(hashtable_t *hash) {
 		while (node != NULL) {
 			hashnode_t *next = node->next;
 
-      
-      robj* node_key_robj = NULL;
-      node_key_robj->len = strlen(node->key);
-      node_key_robj->ptr = node->key;
-			int new_idx = _hash(node_key_robj, hash->rehash_slots);
+			int new_idx = murmurhash3_32(node->key, strlen(node->key)) % hash->rehash_slots;
 
 			node->next = hash->rehash_nodes[new_idx];
 			hash->rehash_nodes[new_idx] = node;
