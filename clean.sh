@@ -1,15 +1,7 @@
 #!/bin/bash
 
-# KVStore 持久化测试脚本
-# 功能：自动测试 KSF 和 AOF 持久化功能
-
 set -e
 
-# 配置
-SERVER_IP="127.0.0.1"
-SERVER_PORT="8888"
-TESTCASE_BIN="./testcase"
-KVSTORE_BIN="./kvstore"
 DATA_DIR="./data"
 
 # 颜色输出
@@ -30,8 +22,6 @@ print_warn() {
 print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
-
-# 检查服务器是否运行
 
 # 清理数据文件
 clean_data() {
