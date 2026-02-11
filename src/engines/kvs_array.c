@@ -1,4 +1,4 @@
-#include "../../kvstore.h"
+#include "../../include/kvstore.h"
 #if ENABLE_ARRAY
 #include <math.h>
 // 使用 singleton 单例模式

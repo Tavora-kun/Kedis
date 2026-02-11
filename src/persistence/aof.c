@@ -12,7 +12,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "../../kvstore.h"
+#include "../../include/kvstore.h"
 
 // 重新声明全局变量
 #if ENABLE_MULTI_ENGINE

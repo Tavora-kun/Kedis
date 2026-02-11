@@ -3,7 +3,7 @@
 #include <string.h>
 
 #include "../../include/kvs_protocol.h"
-#include "../../kvstore.h"
+#include "../../include/kvstore.h"
 
 void kvs_resp_reset(struct conn* c) {
   c->rlen = 0;                  // 重置读缓冲区有效数据长度
