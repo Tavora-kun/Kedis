@@ -4,46 +4,50 @@
 [![Platform](https://img.shields.io/badge/platform-Linux-orange.svg)]()
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)]()
 
-KVstore 是一个高性能、多引擎、支持持久化及 eBPF 增强功能的 C 语言 Key-Value 存储系统，深度集成了协程框架与内核增强技术。
+KVstore 是一个高性能、多引擎、支持持久化及基于 eBPF 主从增量同步的 C 语言 Key-Value 存储系统，深度集成了 io_uring 与 eBPF 内核增强技术。
 
 ## Table of Contents
 
 - [Introduction](#introduction)
+  - [Key Components](#key-components)
 - [Features](#features)
 - [Get Started](#get-started)
+  - [Clone the Repository](#clone-the-repository)
   - [Requirements](#requirements)
   - [Build](#build)
   - [Run and Play](#run-and-play)
   - [Test](#test)
 - [Performance](#performance)
   - [Hardware Spec](#hardware-spec)
-  - [Benchmarks and QPS numbers](#benchmarks-and-qps-numbers)
+  - [固定大小不同引擎SET (128B, 512B, 1024B)](#固定大小不同引擎set-128b-512b-1024b)
+  - [固定 size 的单 GET 测试 (热区数据预填充 `hit-rate=0.8`)](#固定-size-的单-get-测试-热区数据预填充-hit-rate08-)
+  - [业务场景模拟 (不预热, 2:8, 5:5, 60s)](#业务场景模拟不预热2855-60s)
 - [Contributing](#contributing)
 - [Support](#support)
 - [License](#license)
 
 ## Introduction
 
-KVstore 旨在构建一个高性能的存储基座，完全兼容 RESP (Redis Serialization Protocol) 协议。它通过模块化设计支持多种存储引擎（Hash, RBTree, SkipList），并集成了 NtyCo 协程网络框架以处理海量并发连接。此外，项目引入了 eBPF 技术，实现在内核态对数据流进行监控与镜像转发（mirror 模块）。
+KVstore 旨在构建一个高性能的存储基座，完全兼容 RESP (Redis Serialization Protocol) 协议。它通过模块化设计支持多种存储引擎（Array, Hash, RBTree, SkipList），并集成了 NtyCo 协程、基于 epoll 的 reactor 模型和基于 io_uring 的 proactor模型以处理海量并发连接。此外，项目引入了 eBPF 技术（mirror 模块）, 挂载点为 tc-ingress，并使用 ring-buf 实现内核态到用户态的无上限、高吞吐的数据传输，从而实现在用户态对内核数据流进行镜像转发。
 
 ### Key Components
 
 | 目录 | 说明 |
 | :--- | :-- |
 | `src/` | 核心源代码（协议解析、存储引擎、网络模型、持久化） |
-| `include/` | 全局头文件定义 |
-| `mirror/` | eBPF 扩展模块，包含独立的 libbpf 构建系统 |
-| `NtyCo/` | 集成的协程库，提供高性能 IO 支持 |
-| `client/` | Rust 语言编写的官方客户端 |
+| `include/` | 核心头文件定义 |
+| `mirror/` | eBPF 扩展模块，包含独立的 libbpf、bpftool 构建系统 |
+| `NtyCo/` | 集成的协程库（子模块），提供高性能 IO 支持 |
+| `client/` | 客户端示例（Rust、Python） |
 | `tests/` | 自动化测试套件与性能基准测试 |
 
 ## Features
 
-- **RESP 协议兼容**: 支持标准 Redis 指令集，无缝对接现有 Redis 客户端。
-- **多引擎架构**: 针对不同场景提供 Hash, RBTree, SkipList, Array 等多种存储实现。
-- **持久化机制**: 集成 AOF (Append Only File) 与 KSF (Snapshot) 两种持久化策略，确保数据安全。
+- **RESP 协议兼容**: 使用针对 4 个引擎和快照存储落盘的 22 个指令，服务端与客户端完全使用 RESP 通信协议。
+- **多引擎架构**: 提供 **Hash, RBTree, SkipList, Array** 多种数据结构实现。
+- **mmap 持久化机制**: 集成 AOF (Append Only File) 与 KSF (Snapshot) 两种持久化策略，使用名为 ksf 的自研数据存储格式，加载数据时均采用 **mmap** 减少数据拷贝。
 - **协程并发模型**: 基于 NtyCo 实现的 Reactor/Proactor 网络模型，极大提升单机并发吞吐。
-- **eBPF 增强模块**: 利用 eBPF 技术在内核态实现数据镜像转发与性能监控，降低上下文切换开销。
+- **eBPF 独立镜像模块**: 利用 eBPF 技术在内核态实现数据镜像转发与性能监控，完全支持 Redis 等所有基于 TCP 的网络服务流量转发。
 
 ## Get Started
 
@@ -55,9 +59,8 @@ KVstore 旨在构建一个高性能的存储基座，完全兼容 RESP (Redis Se
 
 ### Requirements
 
-- **基础构建工具**: `gcc`, `clang` (eBPF 编译必需), `make`, `cmake`
-- **库依赖**: `libelf-dev`, `zlib1g-dev` (eBPF 组件依赖)
-- **环境**: Rust 工具链 (用于编译高性能客户端), Python (用于自动化测试), Linux 内核版本 5.8+
+- **基础构建工具**: `gcc`, `clang` (eBPF 编译必需), `make`
+- **环境**: Rust 工具链 (可选：用于编译高性能客户端), Python (用于自动化测试), Linux 内核版本 5.8+
 
 ### Build
 
@@ -73,8 +76,8 @@ make
 ```bash
 cd mirror
 make help      # 查看编译帮助
-make prebuild  # 构建 libbpf 和 bpftool (首次运行必做)
-make all       # 编译 mirror 程序
+make prebuild  # 构建 libbpf 和 bpftool
+make all       # 编译 mirror 程序（推荐：一步到位✔）
 make vmlinux   # 从当前系统内核提取 vmlinux.h
 make clean     # 清理所有构建产物
 ```
@@ -108,6 +111,14 @@ cd client && cargo run -- -P <本地端口号> -i
 
 ```bash
 python3 tests/resp_client.py
+```
+
+**开启 mirror 镜像转发**
+
+```bash
+# ⚠️ 默认：KV 存储主节点服务开在 8888 端口下
+# 网卡名称可通过 ip addr 查看
+sudo ./mirror <网卡名> <slave_ip> <slave_port>
 ```
 
 ### Test
@@ -194,7 +205,7 @@ python benchmark.py -t 8 -c 5 --command "<A/R/H/S>SET __key__ __value__" --test-
 ### 固定 size 的单 GET 测试 (热区数据预填充 `hit-rate=0.8` )
 
 ```bash
-python benchmark.py -t 8 -c 5 --command "<引擎前缀>GET __key__ __value__" --test-time 30 --data-size 128 --key-minimum 1 --key-maximum 32768 --populate --hit-rate 0.8
+python benchmark.py -t 8 -c 5 --command "<A/R/H/S>GET __key__ __value__" --test-time 30 --data-size 128 --key-minimum 1 --key-maximum 32768 --populate --hit-rate 0.8
 ```
 
 #### Array
@@ -222,7 +233,7 @@ python benchmark.py -t 8 -c 5 --command "<引擎前缀>GET __key__ __value__" --
 #### 2:8
 
 ```bash
-python benchmark.py -t 8 -c 5 --ratio "aset:2,aget:8" --test-tim
+python benchmark.py -t 8 -c 5 --ratio "<a/r/h/s>set:2,<a/r/h/s>get:8" --test-tim
 e 60 --data-size 128 --key-minimum 1 --key-maximum 524288 --hit-rate 0.8
 ```
 
@@ -264,7 +275,7 @@ e 60 --data-size 128 --key-minimum 1 --key-maximum 524288 --hit-rate 0.8
 
 ## Contributing
 
-欢迎任何形式的贡献！在提交 PR 之前，请确保已通过所有 `tests/` 下的一致性测试。
+欢迎任何形式的贡献！在提交 PR 之前，请确保已通过所有 `tests/` 下的一致性测试 `conformance.py`。
 
 ## Support
 
