@@ -185,32 +185,30 @@ int kvs_hash_set(kvs_hash_t *hash, robj* key, robj* value) {
 	}
 
 	int idx_main = _hash(key, hash->max_slots);
-	int idx_rehash = hash->rehash_nodes ? _hash(key, hash->rehash_slots) : -1;
-
 	hashnode_t *node = NULL;
 
-	if (hash->rehash_nodes && idx_rehash < hash->rehash_index) {
-		node = hash->rehash_nodes[idx_rehash];
-		while (node != NULL) {
-			if (strcmp(node->key, key->ptr) == 0) {
-				return 1;
-			}
-			node = node->next;
-		}
-	}
-
+	// 1. 查找是否存在 (必须查两张表)
 	node = hash->nodes[idx_main];
 	while (node != NULL) {
-		if (strcmp(node->key, key->ptr) == 0) {
-			return 1;
-		}
+		if (strcmp(node->key, key->ptr) == 0) return 1;
 		node = node->next;
+	}
+
+	if (hash->rehash_state == REHASH_STATE_ACTIVE) {
+		int idx_rehash = _hash(key, hash->rehash_slots);
+		node = hash->rehash_nodes[idx_rehash];
+		while (node != NULL) {
+			if (strcmp(node->key, key->ptr) == 0) return 1;
+			node = node->next;
+		}
 	}
 
 	hashnode_t *new_node = _create_node(key, value);
 	if (!new_node) return -1;
 
-	if (hash->rehash_nodes && idx_rehash < hash->rehash_index) {
+	// 2. 插入：rehashing 期间始终插入新表
+	if (hash->rehash_state == REHASH_STATE_ACTIVE) {
+		int idx_rehash = _hash(key, hash->rehash_slots);
 		new_node->next = hash->rehash_nodes[idx_rehash];
 		hash->rehash_nodes[idx_rehash] = new_node;
 	} else {
@@ -223,73 +221,61 @@ int kvs_hash_set(kvs_hash_t *hash, robj* key, robj* value) {
 }
 
 char * kvs_hash_get(kvs_hash_t *hash, robj* key) {
-
 	if (!hash || !key || !key->ptr) return NULL;
 
 	for (int step = 0; step < REHASH_STEPS_PER_OP; step++) {
 		if (kvs_hash_step_rehash(hash) == 1) break;
 	}
 
+	// 1. 查找旧表
 	int idx_main = _hash(key, hash->max_slots);
-	int idx_rehash = hash->rehash_nodes ? _hash(key, hash->rehash_slots) : -1;
-
-	if (hash->rehash_nodes && idx_rehash < hash->rehash_index) {
-		hashnode_t *node = hash->rehash_nodes[idx_rehash];
-		while (node != NULL) {
-			if (strcmp(node->key, key->ptr) == 0) {
-				return node->value;
-			}
-			node = node->next;
-		}
-	}
-
 	hashnode_t *node = hash->nodes[idx_main];
 	while (node != NULL) {
-		if (strcmp(node->key, key->ptr) == 0) {
-			return node->value;
-		}
+		if (strcmp(node->key, key->ptr) == 0) return node->value;
 		node = node->next;
+	}
+
+	// 2. 查找新表（如果正在 rehash）
+	if (hash->rehash_state == REHASH_STATE_ACTIVE) {
+		int idx_rehash = _hash(key, hash->rehash_slots);
+		node = hash->rehash_nodes[idx_rehash];
+		while (node != NULL) {
+			if (strcmp(node->key, key->ptr) == 0) return node->value;
+			node = node->next;
+		}
 	}
 
 	return NULL;
 }
 
 int kvs_hash_mod(kvs_hash_t *hash, robj* key, robj* value) {
-
 	if (!hash || !key || !key->ptr || !value || !value->ptr) return -1;
 
 	for (int step = 0; step < REHASH_STEPS_PER_OP; step++) {
 		if (kvs_hash_step_rehash(hash) == 1) break;
 	}
 
-	int idx_main = _hash(key, hash->max_slots);
-	int idx_rehash = hash->rehash_nodes ? _hash(key, hash->rehash_slots) : -1;
-
 	hashnode_t *node = NULL;
+	int idx_main = _hash(key, hash->max_slots);
 
-	if (hash->rehash_nodes && idx_rehash < hash->rehash_index) {
+	// 1. 查找旧表
+	node = hash->nodes[idx_main];
+	while (node != NULL) {
+		if (strcmp(node->key, key->ptr) == 0) break;
+		node = node->next;
+	}
+
+	// 2. 查找新表（如果正在 rehash）
+	if (node == NULL && hash->rehash_state == REHASH_STATE_ACTIVE) {
+		int idx_rehash = _hash(key, hash->rehash_slots);
 		node = hash->rehash_nodes[idx_rehash];
 		while (node != NULL) {
-			if (strcmp(node->key, key->ptr) == 0) {
-				break;
-			}
+			if (strcmp(node->key, key->ptr) == 0) break;
 			node = node->next;
 		}
 	}
 
-	if (node == NULL) {
-		node = hash->nodes[idx_main];
-		while (node != NULL) {
-			if (strcmp(node->key, key->ptr) == 0) {
-				break;
-			}
-			node = node->next;
-		}
-	}
-
-	if (node == NULL) {
-		return 1;
-	}
+	if (node == NULL) return 1;
 
 #if HASH_ENABLE_KEY_POINTER
 	kvs_free(node->value);
@@ -317,46 +303,14 @@ int kvs_hash_del(kvs_hash_t *hash, robj* key) {
 		if (kvs_hash_step_rehash(hash) == 1) break;
 	}
 
+	// 1. 尝试从旧表删除
 	int idx_main = _hash(key, hash->max_slots);
-	int idx_rehash = hash->rehash_nodes ? _hash(key, hash->rehash_slots) : -1;
-
-	hashnode_t *node = NULL;
+	hashnode_t *node = hash->nodes[idx_main];
 	hashnode_t *prev = NULL;
-
-	if (hash->rehash_nodes && idx_rehash < hash->rehash_index) {
-		node = hash->rehash_nodes[idx_rehash];
-		prev = NULL;
-		while (node != NULL) {
-			if (strcmp(node->key, key->ptr) == 0) {
-				if (prev == NULL) {
-					hash->rehash_nodes[idx_rehash] = node->next;
-				} else {
-					prev->next = node->next;
-				}
-
-#if HASH_ENABLE_KEY_POINTER
-				kvs_free(node->key);
-				kvs_free(node->value);
-#endif
-				kvs_free(node);
-				hash->count--;
-
-				return 0;
-			}
-			prev = node;
-			node = node->next;
-		}
-	}
-
-	node = hash->nodes[idx_main];
-	prev = NULL;
 	while (node != NULL) {
 		if (strcmp(node->key, key->ptr) == 0) {
-			if (prev == NULL) {
-				hash->nodes[idx_main] = node->next;
-			} else {
-				prev->next = node->next;
-			}
+			if (prev == NULL) hash->nodes[idx_main] = node->next;
+			else prev->next = node->next;
 
 #if HASH_ENABLE_KEY_POINTER
 			kvs_free(node->key);
@@ -364,11 +318,33 @@ int kvs_hash_del(kvs_hash_t *hash, robj* key) {
 #endif
 			kvs_free(node);
 			hash->count--;
-
 			return 0;
 		}
 		prev = node;
 		node = node->next;
+	}
+
+	// 2. 尝试从新表删除（如果正在 rehash）
+	if (hash->rehash_state == REHASH_STATE_ACTIVE) {
+		int idx_rehash = _hash(key, hash->rehash_slots);
+		node = hash->rehash_nodes[idx_rehash];
+		prev = NULL;
+		while (node != NULL) {
+			if (strcmp(node->key, key->ptr) == 0) {
+				if (prev == NULL) hash->rehash_nodes[idx_rehash] = node->next;
+				else prev->next = node->next;
+
+#if HASH_ENABLE_KEY_POINTER
+				kvs_free(node->key);
+				kvs_free(node->value);
+#endif
+				kvs_free(node);
+				hash->count--;
+				return 0;
+			}
+			prev = node;
+			node = node->next;
+		}
 	}
 
 	return 1;
