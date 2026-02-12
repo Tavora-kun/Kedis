@@ -120,6 +120,8 @@ python3 tests/conformance.py
 
 ## Performance
 
+*测试时间 2026.2.12*
+
 ### Hardware Spec
 
 - **CPU**: 18 × Intel® Core™ Ultra 5 125H
@@ -127,11 +129,138 @@ python3 tests/conformance.py
 - **Kernel**: Linux 6.18.8-arch2-1 (64 位)
 > 内核版本 >= 5.8 以支持 eBPF ring_buf 特性
 
-### Benchmarks and QPS numbers
+### 固定大小不同引擎SET (128B, 512B, 1024B)
 
-*(此处可添加性能压测图表与数据结论)*
+```bash
+python benchmark.py -t 8 -c 5 --command "<A/R/H/S>SET __key__ __value__" --test-time 30 --data-size <128/512/1024> --key-minimum 1 --key-maximum 1048576
+```
 
-### QPS on different payload
+#### Array
+
+##### 128
+
+![image-20260212162917115](README.assets/image-20260212162917115.png)
+
+##### 512
+
+![image-20260212162934970](README.assets/image-20260212162934970.png)
+
+##### 1024
+
+![image-20260212162950146](README.assets/image-20260212162950146.png)
+
+#### RBtree
+
+##### 128
+
+![image-20260212163047276](README.assets/image-20260212163047276.png)
+
+##### 512
+
+![image-20260212163247599](README.assets/image-20260212163247599.png)
+
+##### 1024
+
+![image-20260212163346868](README.assets/image-20260212163346868.png)
+
+#### Hash
+
+##### 128
+
+![image-20260212174535454](README.assets/image-20260212174535454.png)
+
+##### 512
+
+![image-20260212174648558](README.assets/image-20260212174648558.png)
+
+##### 1024
+
+![image-20260212174742342](README.assets/image-20260212174742342.png)
+
+#### SkipList
+
+##### 128
+
+![image-20260212165105784](README.assets/image-20260212165105784.png)
+
+##### 512
+
+![image-20260212165156867](README.assets/image-20260212165156867.png)
+
+##### 1024
+
+![image-20260212164956516](README.assets/image-20260212164956516.png)
+
+### 固定 size 的单 GET 测试 (热区数据预填充 `hit-rate=0.8` )
+
+```bash
+python benchmark.py -t 8 -c 5 --command "<引擎前缀>GET __key__ __value__" --test-time 30 --data-size 128 --key-minimum 1 --key-maximum 32768 --populate --hit-rate 0.8
+```
+
+#### Array
+
+![image-20260212171228478](README.assets/image-20260212171228478.png)
+
+#### RBtree
+
+![image-20260212171238432](README.assets/image-20260212171238432.png)
+
+#### Hash
+
+![image-20260212174918128](README.assets/image-20260212174918128.png)
+
+#### SkipList
+
+![image-20260212175036469](README.assets/image-20260212175036469.png)
+
+
+
+
+
+### 业务场景模拟(不预热,2:8,5:5, 60s)
+
+#### 2:8
+
+```bash
+python benchmark.py -t 8 -c 5 --ratio "aset:2,aget:8" --test-tim
+e 60 --data-size 128 --key-minimum 1 --key-maximum 524288 --hit-rate 0.8
+```
+
+##### Array
+
+![image-20260212185701984](README.assets/image-20260212185701984.png)
+
+##### RBtree
+
+![image-20260212185526358](README.assets/image-20260212185526358.png)
+
+##### Hash
+
+![image-20260212190041363](README.assets/image-20260212190041363.png)
+
+##### SkipList
+
+![image-20260212190214645](README.assets/image-20260212190214645.png)
+
+#### 5:5
+
+##### Array
+
+![image-20260212190817121](README.assets/image-20260212190817121.png)
+
+##### RBtree
+
+![image-20260212190651963](README.assets/image-20260212190651963.png)
+
+##### Hash
+
+![image-20260212190949494](README.assets/image-20260212190949494.png)
+
+##### SkipList
+
+![image-20260212191116300](README.assets/image-20260212191116300.png)
+
+
 
 ## Contributing
 
