@@ -6,7 +6,7 @@
 
 #if ENABLE_SKIPLIST
 
-  #define SKIPLIST_MAX_LEVEL 6
+#define MAX_LEVEL 12
 
   typedef struct skiplist_node_s {
     char *key;

@@ -18,7 +18,7 @@ SRCS = src/core/kvstore.c \
 OBJS = $(SRCS:.c=.o)
 
 # 测试用例（独立编译）
-TEST_SRCS = tests/testcase.c
+TEST_SRCS = tests/testcase.c tests/testcase_persistence.c
 TEST_OBJS = $(TEST_SRCS:.c=.o)
 
 TARGET = kvstore
@@ -44,7 +44,7 @@ $(TARGET): $(OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
 
 # 测试程序（独立，不链接主项目）
-$(TESTCASE): tests/testcase.o
+$(TESTCASE): tests/testcase.o tests/testcase_persistence.o
 	$(CC) -o $@ $^
 
 clean:

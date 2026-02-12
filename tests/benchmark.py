@@ -188,31 +188,30 @@ class PerformanceTester:
             print(" [DONE]")
 
         # 1. SET 阶段
-        print("\n[Step 1/2] 正在向 4 个引擎填充数据...")
-        for eng in engines:
-            def set_action(start, end):
-                c = BenchmarkClient(self.args.server, self.args.port).connect()
-                p = self.generate_payload(self.args.data_size)
-                cmd = f"{eng}SET"
-                for i in range(start, end + 1):
-                    # 使用标准 execute 进行同步预热
-                    c.execute(cmd, f"{self.args.key_prefix}{i}", p)
-                c.close()
-            run_parallel_task(f"填充 {eng} 引擎", set_action)
+        eng = input("选择你要预热的引擎(A/R/H/S):")
+        print(f"\n[Step 1/2] 正在向引擎{eng}填充数据...")
+        def set_action(start, end):
+            c = BenchmarkClient(self.args.server, self.args.port).connect()
+            p = self.generate_payload(self.args.data_size)
+            cmd = f"{eng}SET"
+            for i in range(start, end + 1):
+                # 使用标准 execute 进行同步预热
+                c.execute(cmd, f"{self.args.key_prefix}{i}", p)
+            c.close()
+        run_parallel_task(f"填充 {eng} 引擎", set_action)
 
         # 2. GET 验证阶段
-        print("\n[Step 2/2] 正在执行全量 GET 验证...")
-        for eng in engines:
-            def get_action(start, end):
-                c = BenchmarkClient(self.args.server, self.args.port).connect()
-                cmd = f"{eng}GET"
-                for i in range(start, end + 1):
-                    resp = c.execute(cmd, f"{self.args.key_prefix}{i}")
-                    # 验证响应，确保热区 Key 确实存在
-                    if not resp or resp[0] != 'bulk_string' or resp[1] is None:
-                        print(f"\n[CRITICAL] 预热验证失败! 引擎: {eng}, Key: {self.args.key_prefix}{i}, 响应: {resp}")
-                c.close()
-            run_parallel_task(f"验证 {eng} 引擎", get_action)
+        print(f"\n[Step 2/2] 正在执行 {eng}GET 验证...")
+        def get_action(start, end):
+            c = BenchmarkClient(self.args.server, self.args.port).connect()
+            cmd = f"{eng}GET"
+            for i in range(start, end + 1):
+                resp = c.execute(cmd, f"{self.args.key_prefix}{i}")
+                # 验证响应，确保热区 Key 确实存在
+                if not resp or resp[0] != 'bulk_string' or resp[1] is None:
+                    print(f"\n[CRITICAL] 预热验证失败! 引擎: {eng}, Key: {self.args.key_prefix}{i}, 响应: {resp}")
+            c.close()
+        run_parallel_task(f"验证 {eng} 引擎", get_action)
 
         print(f"\n{'='*60}")
         print("预热完成！热区已全部就绪。")

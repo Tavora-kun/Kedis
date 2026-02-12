@@ -1,25 +1,10 @@
 #include "../../include/kvstore.h"
 #if ENABLE_SKIPLIST
-
+#include "../../include/kvs_skiplist.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
-#define MAX_LEVEL 6
-
-typedef struct skiplist_node_s {
-    char *key;
-    char *value;
-    struct skiplist_node_s **forward;
-} skiplist_node_t;
-
-typedef struct skiplist_s {
-    int level;
-    skiplist_node_t *header;
-} skiplist_t;
-
-typedef struct skiplist_s kvs_skiplist_t;
 
 kvs_skiplist_t global_skiplist;
 
