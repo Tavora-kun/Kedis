@@ -1,9 +1,8 @@
+#include "../../include/kvstore.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../include/kvs_protocol.h"
-#include "../../include/kvstore.h"
 
 void kvs_resp_reset(struct conn* c) {
   c->rlen = 0;                  // 重置读缓冲区有效数据长度
@@ -29,11 +28,6 @@ void kvs_resp_reset(struct conn* c) {
 }
 
 void kvs_resp_free_resources(struct conn* c) {
-  // 释放当前正在解析的 buffer
-  // if (c->seg_buf) {
-  //   kvs_free(c->seg_buf);
-  //   c->seg_buf = NULL;
-  // }
 
   // 释放已解析的参数
   for (int i = 0; i < c->argc; i++) {
@@ -58,12 +52,13 @@ int kvs_resp_feed(struct conn* c) {
   while (c->parse_done < c->rlen && c->resp_state != ST_RESP_OK) {
     switch (c->resp_state) {
       case ST_RESP_HDR: {
+        kvs_logDebug("RECV: into [ST_RESP_HDR]");
         // 检查是否以 * 开头（Array 格式）
         // DEBUG
         // fprintf(stderr, "-->hdr: rbuf: %s\n", c->rbuf);
         if (c->rbuf[c->parse_done] != '*') {
             // fprintf(stderr, "rbuf: %*s\nparse_>done后: %*s\n", IOP_SIZE, c->rbuf, IOP_SIZE - c->parse_done, c->rbuf + c->parse_done);
-            fprintf(stderr, "the first char must be *\n");
+            kvs_logError("the first char must be *");
           goto error;  // 协议错误：不是 Array 格式
         }
 
@@ -82,7 +77,7 @@ int kvs_resp_feed(struct conn* c) {
         // fprintf(stderr, "c->argc=%d\n", c->argc);
         // 检查解析是否成功（endptr 应该指向 \r）
         if (endptr != end) {
-          fprintf(stderr, "[ERROR] argc parse\n");
+          kvs_logError("argc convert error");
           goto error;  // 解析错误：数字格式错误
         }
         
@@ -94,6 +89,7 @@ int kvs_resp_feed(struct conn* c) {
         break;
       }
       case ST_RESP_BULK_LEN: {
+        kvs_logDebug("RECV: into [ST_RESP_BULK_LEN]");
         // 检查是否以 $ 开头（Bulk String 格式）
         
         // DEBUG
@@ -101,7 +97,7 @@ int kvs_resp_feed(struct conn* c) {
         
         // fprintf(stderr, "c->parse_down:这个位置是:%s\n", c->rbuf[c->parse_done]);
         if (c->rbuf[c->parse_done] != '$') {
-          fprintf(stderr, "[ERROR] bulk should start with $\n");
+          kvs_logError("bulk should start with $");
           goto error; // 协议错误：不是 Bulk String 格式
         }
         // fprintf(stderr, "-->bulk_len1\n");
@@ -128,7 +124,7 @@ int kvs_resp_feed(struct conn* c) {
         
         // 检查解析是否成功（endptr 应该指向 \r）
         if (endptr != end) {
-          fprintf(stderr, "[ERROR] bulk len parse\n");
+          kvs_logError("bulk len parse\n");
           goto error;
           // return -1;  // 解析错误：数字格式错误
         }
@@ -139,7 +135,7 @@ int kvs_resp_feed(struct conn* c) {
         
         // 处理 NULL bulk string（bulk_len == -1）
         if (c->bulk_len == (size_t)-1) {
-          fprintf(stderr, "NULL STRING????\n");
+            kvs_logError("NULL STRING?\n");
           c->argv[c->argc_done].ptr = NULL;  // NULL 指针
           c->argv[c->argc_done].len = 0;     // 长度为 0
           c->argc_done++;                    // 已解析参数个数加 1
@@ -154,14 +150,14 @@ int kvs_resp_feed(struct conn* c) {
         
         // 检查 bulk_len 是否超过最大限制
         if (c->bulk_len > MAX_SEG_SIZE) {
-          fprintf(stderr, "[ERROR] bulk too big\n");
+          kvs_logError("bulk too big\n");
           goto error;  // 数据过大，拒绝处理
         }
         
         // 分配内存存储 bulk data（+1 用于 null terminator）
         c->argv[c->argc_done].ptr = kvs_malloc(c->bulk_len + 1);
         if (!c->argv[c->argc_done].ptr) {
-          fprintf(stderr, "[ERROR] bulk malloc fail\n");
+          kvs_logError("bulk malloc fail\n");
           goto error;  // 内存分配失败
         }
         c->argv[c->argc_done].len = c->bulk_len;        // 记录长度
@@ -173,6 +169,7 @@ int kvs_resp_feed(struct conn* c) {
         break;
       }
       case ST_RESP_BULK_DATA: {
+        kvs_logDebug("RECV: into [ST_RESP_BULK_DATA]");
         // 计算还需要接收多少 bulk data
         
         // fprintf(stderr, "-->bulk_data\n");
@@ -220,7 +217,7 @@ int kvs_resp_feed(struct conn* c) {
           // 检查 \r\n 是否正确
           if (c->rbuf[c->parse_done] != '\r' ||
             c->rbuf[c->parse_done + 1] != '\n') {
-              fprintf(stderr, "[ERROR] bulk should end with \\r\\n\n");
+              kvs_logError("bulk should end with \\r\\n\n");
               goto error;  // 协议错误：缺少 \r\n
           }
           // fprintf(stderr, "data:--> 3\n");
@@ -302,11 +299,6 @@ int kvs_resp_feed(struct conn* c) {
         // rlen, parse_done, 在循环内判断出粘包的时候已初始化;
         return RESP_PARSE_OK;
 
-      // size_t remaining = c->rlen - c->parse_done;
-      // memmove(c->rbuf, c->rbuf + c->parse_done, remaining);
-      // c->rlen = remaining;
-      // c->parse_done = 0;
-      // return RESP_CONTINUE_REMAINING_RECV;
     }
     return RESP_PARSE_OK;
   } else if (c->parse_done < c->rlen) {

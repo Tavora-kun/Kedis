@@ -15,6 +15,7 @@ SRCS = src/core/kvstore.c \
        src/persistence/ksf.c \
        src/persistence/aof.c \
        src/utils/memory_pool.c \
+	   src/utils/kvs_log.c
 
 OBJS = $(SRCS:.c=.o)
 

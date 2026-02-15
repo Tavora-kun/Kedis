@@ -88,17 +88,18 @@ static int mmap_open_file(const char* filename, mmap_context_t* ctx) {
     ctx->fd = open(filename, O_RDONLY);
     if (ctx->fd == -1) {
         // 文件不存在是正常的，返回成功
+        kvs_logWarn("kvs 快照文件不存在");
         if (errno == ENOENT) {
             return 0;
         }
-        fprintf(stderr, "错误：无法打开文件 %s: %s\n", filename, strerror(errno));
+        kvs_logError("无法打开文件 %s: %s", filename, strerror(errno));
         return -1;
     }
 
     // 使用 fstat() 获取文件大小
     struct stat stat_buf;
     if (fstat(ctx->fd, &stat_buf) == -1) {
-        fprintf(stderr, "错误：无法获取文件状态 %s: %s\n", filename, strerror(errno));
+        kvs_logError("无法获取文件状态 %s: %s", filename, strerror(errno));
         close(ctx->fd);
         return -1;
     }
@@ -108,7 +109,7 @@ static int mmap_open_file(const char* filename, mmap_context_t* ctx) {
 
     // 检查文件是否为空
     if (ctx->file_size == 0) {
-        printf("文件为空: %s\n", filename);
+        kvs_logInfo("文件为空: %s", filename);
         close(ctx->fd);
         return 0;
     }
@@ -120,12 +121,12 @@ static int mmap_open_file(const char* filename, mmap_context_t* ctx) {
     // 执行 mmap 映射
     ctx->mmap_addr = mmap(NULL, ctx->mmap_size, PROT_READ, MAP_PRIVATE, ctx->fd, 0);
     if (ctx->mmap_addr == MAP_FAILED) {
-        fprintf(stderr, "错误：mmap 失败 %s: %s\n", filename, strerror(errno));
+        kvs_logError("mmap 失败 %s: %s", filename, strerror(errno));
         close(ctx->fd);
         return -1;
     }
 
-    printf("mmap 映射成功: %s (大小: %zu 字节)\n", filename, ctx->file_size);
+    kvs_logInfo("mmap 映射成功: %s (大小: %zu 字节)", filename, ctx->file_size);
     return 0;
 }
 
@@ -434,7 +435,7 @@ static int ksfSaveToFile(const char* filename, int (*write_func)(int)) {
 
   int fd = open(temp_filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd == -1) {
-    fprintf(stderr, "错误：无法创建临时KSF文件 %s\n", temp_filename);
+    kvs_logError("无法创建临时KSF文件 %s\n", temp_filename);
     return -1;
   }
 
@@ -450,16 +451,16 @@ static int ksfSaveToFile(const char* filename, int (*write_func)(int)) {
   if (result == 0) {
     // 重命名临时文件为最终文件名
     if (rename(temp_filename, filename) != 0) {
-      fprintf(stderr, "错误：重命名KSF文件失败: %s\n", strerror(errno));
+      kvs_logError("重命名KSF文件失败: %s", strerror(errno));
       // 删除临时文件
       unlink(temp_filename);
       return -1;
     }
-    printf("KSF快照保存成功: %s\n", filename);
+    kvs_logInfo("KSF快照保存成功: %s", filename);
   } else {
     // 如果写入过程中出现错误，删除临时文件
     unlink(temp_filename);
-    fprintf(stderr, "错误：写入KSF快照失败\n");
+    kvs_logError("写入KSF快照失败");
   }
 
   return result;
@@ -484,7 +485,7 @@ int ksfSave(const char* filename) {
   #endif
 #else
   // 多引擎模式不应该调用这个函数
-  fprintf(stderr, "错误：多引擎模式下请使用 ksfSaveAll()\n");
+  kvs_logError("多引擎模式下请使用 ksfSaveAll()");
   return -1;
 #endif
 }
@@ -557,7 +558,7 @@ int ksfSaveBackground() {
     return 0;  // 父进程立即返回
   } else {
     // fork失败
-    fprintf(stderr, "错误：fork BGSAVE进程失败\n");
+    kvs_logError("fork BGSAVE进程失败\n");
     return -1;
   }
 }
@@ -569,12 +570,12 @@ int ksfSaveBackground() {
  * @return 成功返回0，失败返回-1
  */
 static int ksfLoadToEngine(const char* filename, int engine_type) {
-  printf("开始加载KSF快照文件: %s\n", filename);
+  kvs_logInfo("开始加载KSF快照文件: %s", filename);
 
   // 检查文件是否存在
   FILE* file = fopen(filename, "rb");
   if (!file) {
-    printf("KSF快照文件不存在或无法打开: %s\n", filename);
+    kvs_logWarn("KSF快照文件不存在或无法打开: %s", filename);
     return 0;  // 文件不存在是正常的，返回成功
   }
 
@@ -584,7 +585,7 @@ static int ksfLoadToEngine(const char* filename, int engine_type) {
   fseek(file, 0, SEEK_SET);
 
   if (file_size == 0) {
-    printf("KSF快照文件为空: %s\n", filename);
+    kvs_logInfo("KSF快照文件为空: %s", filename);
     fclose(file);
     return 0;
   }
@@ -592,7 +593,7 @@ static int ksfLoadToEngine(const char* filename, int engine_type) {
   // 分配缓冲区读取整个文件
   char* buffer = (char*)kvs_malloc(file_size);
   if (!buffer) {
-    fprintf(stderr, "无法分配内存来加载KSF快照文件\n");
+    kvs_logError("无法分配内存来加载KSF快照文件");
     fclose(file);
     return -1;
   }
@@ -600,7 +601,7 @@ static int ksfLoadToEngine(const char* filename, int engine_type) {
   // 读取文件内容
   size_t bytes_read = fread(buffer, 1, file_size, file);
   if (bytes_read != file_size) {
-    fprintf(stderr, "读取KSF快照文件时发生错误\n");
+    kvs_logError("读取KSF快照文件时发生错误");
     kvs_free(buffer);
     fclose(file);
     return -1;
@@ -630,7 +631,7 @@ static int ksfLoadToEngine(const char* filename, int engine_type) {
     if (key_len > 0) {
       key.ptr = (char*)kvs_malloc(key_len);
       if (!key.ptr) {
-        fprintf(stderr, "无法分配内存来存储键\n");
+        kvs_logError("无法分配内存来存储键");
         kvs_free(buffer);
         return -1;
       }
@@ -650,7 +651,7 @@ static int ksfLoadToEngine(const char* filename, int engine_type) {
       }
       value.ptr = (char*)kvs_malloc(val_len);
       if (!value.ptr) {
-        fprintf(stderr, "无法分配内存来存储值\n");
+        kvs_logError("无法分配内存来存储值");
         if (key.ptr) kvs_free(key.ptr);
         kvs_free(buffer);
         return -1;
@@ -689,7 +690,7 @@ static int ksfLoadToEngine(const char* filename, int engine_type) {
   }
 
   kvs_free(buffer);
-  printf("KSF快照文件加载完成: %s\n", filename);
+  kvs_logInfo("KSF快照文件加载完成: %s", filename);
   return 0;
 }
 
@@ -703,7 +704,7 @@ int ksfLoad(const char* filename) {
   return ksfLoadToEngine(filename, -1);
 #else
   // 多引擎模式不应该调用这个函数
-  fprintf(stderr, "错误：多引擎模式下请使用 ksfLoadAll()\n");
+  kvs_logError("多引擎模式下请使用 ksfLoadAll()");
   return -1;
 #endif
 }
@@ -715,7 +716,7 @@ int ksfLoad(const char* filename) {
  * @return 成功返回 0，失败返回 -1
  */
 static int ksfLoadToEngine_mmap(const char* filename, int engine_type) {
-    printf("开始加载 KSF 快照文件（mmap 方式）: %s\n", filename);
+    kvs_logInfo("开始加载 KSF 快照文件（mmap 方式）: %s", filename);
 
     // 初始化 mmap 上下文
     mmap_context_t ctx = {0};
@@ -750,7 +751,7 @@ static int ksfLoadToEngine_mmap(const char* filename, int engine_type) {
 
         // 检查边界
         if (pos + key_len + val_len > ctx.file_size) {
-            fprintf(stderr, "错误：KSF 文件格式错误（超出文件边界）\n");
+            kvs_logError("KSF 文件格式错误（超出文件边界）");
             mmap_close_file(&ctx);
             return -1;
         }
@@ -799,7 +800,7 @@ static int ksfLoadToEngine_mmap(const char* filename, int engine_type) {
     // 关闭 mmap 映射
     mmap_close_file(&ctx);
 
-    printf("KSF 快照文件加载完成: %s (共 %d 条记录)\n", filename, kv_count);
+    kvs_logInfo("KSF 快照文件加载完成: %s (共 %d 条记录)", filename, kv_count);
     return 0;
 }
 

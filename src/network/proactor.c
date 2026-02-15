@@ -1,5 +1,6 @@
 // proactor.c - Proactor network model with RESP protocol and io_uring
 #define _GNU_SOURCE
+#include "../../include/kvstore.h"
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
@@ -13,9 +14,6 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include "../../include/kvs_protocol.h"
-#include "../../include/kvstore.h"
-#include "../../include/config.h"
 
 extern kv_config g_config;
 
@@ -84,7 +82,7 @@ static struct io_uring_sqe* sqe_prep(struct io_uring* ring, struct conn* c) {
   // fprintf(stderr, "-->get sqe\n");
   struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
   if (!sqe) {
-    fprintf(stderr, "get_sqe failed\n");
+    kvs_logError("get_sqe failed");
     exit(1);
   }
   io_uring_sqe_set_data(sqe, c);  // 后面 CQE 能反解出 conn
@@ -145,6 +143,7 @@ static void conn_free(struct conn* c) {
 
 /* ---------------- 监听端口 ---------------- */
 static int init_listen(uint16_t port, const char* bind_addr) {
+
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) {
     perror("socket");
@@ -169,7 +168,7 @@ static int init_listen(uint16_t port, const char* bind_addr) {
   } else {
       /* 使用 inet_pton 转换指定 IP */
       if (inet_pton(AF_INET, bind_addr, &addr.sin_addr) != 1) {
-          fprintf(stderr, "Invalid bind address: %s\n", bind_addr);
+          kvs_logError("Invalid bind address: %s", bind_addr);
           close(fd);
           return -1;
       }
@@ -210,7 +209,7 @@ int proactor_start(unsigned short port, msg_handler handler) {
   io_uring_queue_init(RING_ENTRIES, &g_ring, 0);
   post_accept(&g_ring, listenfd);
 
-  printf("Proactor server listening on port %d...\n", port);
+  kvs_logInfo("Proactor server listening on port %d...", port);
 
   while (1) {
     io_uring_submit(&g_ring);
@@ -227,7 +226,7 @@ int proactor_start(unsigned short port, msg_handler handler) {
         struct conn* nc = conn_pool_alloc(&g_conn_pool);
         if (!nc) {
           close(res);
-          fprintf(stderr, "Max conns reached, rejecting connection\n");
+          kvs_logError("Max conns reached, rejecting connection");
         } else {
           nc->fd = res;
           nc->state = ST_RECV;
@@ -235,7 +234,7 @@ int proactor_start(unsigned short port, msg_handler handler) {
           if (!nc->wbuf) {
             conn_pool_free(&g_conn_pool, nc);
             close(res);
-            fprintf(stderr, "Failed to alloc write buffer\n");
+            kvs_logError("Failed to alloc write buffer");
           } else {
             // conn_reset(nc); -> kvs_resp_reset
             kvs_resp_reset(nc);
@@ -276,8 +275,9 @@ int proactor_start(unsigned short port, msg_handler handler) {
           // 新数据从 c->rbuf + c->rlen 的位置开始写入
 
           // [可以作为最高级日志级别的打印信息]
-          // fprintf(stderr, "[DEBUG]: r->len == %zu\n", c->rlen);
-          // fprintf(stderr, "[DEBUG]: recv (%d bytes):\n%.*s\n====\n", res, res, c->rbuf + c->rlen);
+        //   debug("r->len == %zu", c->rlen);
+        //   debug("recv (%d bytes):\n%.*s\n====", res, res, c->rbuf + c->rlen);
+
           c->rlen += res;  // 累加接收的字节数（不是覆盖）
           c->parse_done = 0;
           // fprintf(stderr, "=========数据包来啦!整个缓冲区哦!\n%*s\n", IOP_SIZE,c->rbuf); // 调用 kvs_resp_feed 解析数据
@@ -286,10 +286,11 @@ int proactor_start(unsigned short port, msg_handler handler) {
           // fprintf(stderr, "==> ret = %d\n", ret);
           if (ret == RESP_ERROR) {
             // 协议错误，关闭连接
-            fprintf(stderr, "kvs_resp_feed: RESP parse error\n");
+            kvs_logError("kvs_resp_feed: RESP parse error");
             conn_free(c);
             conn_pool_free(&g_conn_pool, c);
           } else if (ret == RESP_PARSE_OK) {
+            kvs_logDebug("RESP parse OK");
             // 解析完成，处理命令
             processCommand(c);
             // 切换到发送状态
@@ -298,6 +299,7 @@ int proactor_start(unsigned short port, msg_handler handler) {
             // fprintf(stderr, "==> after process wbuf: %*s\n", c->wbuf, RESP_BUF_SIZE);
             post_send_resp(&g_ring, c);
           } else if (ret == RESP_CONTINUE_RECV) {
+              kvs_logDebug("RESP continue recv");
             // ret == 0，需要更多数据
             // 提交 recv 请求，等待更多数据
             post_recv_frame(&g_ring, c);
@@ -308,8 +310,8 @@ int proactor_start(unsigned short port, msg_handler handler) {
 
       // 发我们准备好的数据过去
       case ST_SEND: {
-        if (c->wlen != res) { // 数据未发完
-          fprintf(stderr, "wlen != sent\n");
+        if (c->wlen != res) { // 数据未发完(比较少见)
+          kvs_logError("wlen != sent");
           // 简易处理, 不管提交了多少, 整个 wbuf 全部重新提交
           post_send_resp(&g_ring, c);  // 重新提交 
           break;
@@ -318,6 +320,7 @@ int proactor_start(unsigned short port, msg_handler handler) {
         memset(c->wbuf, 0, RESP_BUF_SIZE);
         // fprintf(stderr, "======= start =======\n");
         if (c->send_st == ST_SEND_SMALL) {
+          kvs_logDebug("SEND: Small response");
           // fprintf(stderr, "=======  small \n");
           // 可以断言数据已经发完了
           c->state = ST_RECV;
@@ -330,16 +333,16 @@ int proactor_start(unsigned short port, msg_handler handler) {
           post_recv_frame(&g_ring, c);
           break;
         } else {
-          // fprintf(stderr, "=======  big \n");
             if (c->send_st == ST_SEND_HDR_SENT) {
+              kvs_logDebug("SEND: Header sented");
               c->bulk_sent += res - c->hdr_len;
               c->send_st = ST_SEND_BULK;
             }
             else if (c->send_st == ST_SEND_BULK) {
-              // fprintf(stderr, "走这里吧\n");
+              kvs_logDebug("SEND: Bulk data sending");
               c->bulk_sent += res;
             } else {
-              fprintf(stderr, "error: ST_SEND_NOTSET\n");
+              kvs_logError("ST_SEND_NOTSET\n");
               conn_free(c);
               conn_pool_free(&g_conn_pool, c);
             }
@@ -351,7 +354,6 @@ int proactor_start(unsigned short port, msg_handler handler) {
               size_t avail = RESP_BUF_SIZE - c->wlen;
               size_t cp = (avail < remain ? avail : remain);
               // 2. 将数据拷贝到定长缓冲区（或直接从原内存地址发送）
-              // memcpy(fixed_buffer, data.ptr() + sent_offset, chunk_size);
               memcpy(c->wbuf + c->wlen, c->bulk_p, cp);
               c->wlen += cp;
               if (remain <= avail) {
@@ -362,12 +364,10 @@ int proactor_start(unsigned short port, msg_handler handler) {
               } else if (remain == 1) {
                 c->wbuf[c->wlen] = '\n';
               }
-              // if (g_100++ <= 100) fprintf(stderr, "这里死循环?\n");
-              // if (g_100++ <= 100) fprintf(stderr, "bulk_sent : %zu\n", c->bulk_sent);
-              // if (g_100++ <= 100) fprintf(stderr, "p - buf: %zu\n", c->bulk_p - c->wbuf);
               post_send_resp(&g_ring, c);
             } else {
               // bulk 发完了!
+              kvs_logDebug("SEND: Bulk data OVER!");
               c->state = ST_RECV;
               c->bulk_p = c->bulk_data = NULL;
               c->bulk_sent = 0;

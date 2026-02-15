@@ -195,7 +195,7 @@ static int mmap_open_file(const char* filename, mmap_context_t* ctx) {
       return 0;
     }
     // 其他错误情况，打印错误信息并返回失败
-    fprintf(stderr, "错误：无法打开文件 %s: %s\n", filename, strerror(errno));
+    kvs_logError("无法打开文件 %s: %s", filename, strerror(errno));
     return -1;
   }
 
@@ -203,7 +203,7 @@ static int mmap_open_file(const char* filename, mmap_context_t* ctx) {
   struct stat stat_buf;
   if (fstat(ctx->fd, &stat_buf) == -1) {
     // fstat() 失败，打印错误信息并清理资源
-    fprintf(stderr, "错误：无法获取文件状态 %s: %s\n", filename,
+    kvs_logError("无法获取文件状态 %s: %s", filename,
             strerror(errno));
     close(ctx->fd);  // 关闭文件描述符
     return -1;
@@ -242,13 +242,13 @@ static int mmap_open_file(const char* filename, mmap_context_t* ctx) {
   // 步骤 8：检查 mmap() 是否成功
   if (ctx->mmap_addr == MAP_FAILED) {
     // mmap() 失败，打印错误信息并清理资源
-    fprintf(stderr, "错误：mmap 失败 %s: %s\n", filename, strerror(errno));
+    kvs_logError("mmap 失败 %s: %s", filename, strerror(errno));
     close(ctx->fd);  // 关闭文件描述符
     return -1;
   }
 
   // 步骤 9：打印成功信息
-  printf("mmap 映射成功: %s (大小: %zu 字节)\n", filename, ctx->file_size);
+  kvs_logInfo("mmap 映射成功: %s (大小: %zu 字节)", filename, ctx->file_size);
 
   // 步骤 10：返回成功
   return 0;
@@ -306,7 +306,7 @@ static void mmap_close_file(mmap_context_t* ctx) {
  */
 static int aofLoadToEngine_mmap(const char* filename, int engine_type) {
   // 步骤 1：打印开始加载信息
-  printf("开始加载 AOF 文件（mmap 方式）: %s\n", filename);
+  kvs_logInfo("开始加载 AOF 文件（mmap 方式）: %s", filename);
 
   // 步骤 2：初始化 mmap 上下文结构体，所有字段清零
   mmap_context_t ctx = {0};
@@ -336,7 +336,7 @@ static int aofLoadToEngine_mmap(const char* filename, int engine_type) {
     // 检查是否还有数据可读
     // 从映射内存中读取 1 字节的命令码
     uint8_t cmd_type = (uint8_t)data[pos++];
-    // fprintf(stderr, "读取到的命令码: %02X\n", cmd_type);
+    kvs_logDebug("读取到的命令码: %02X\n", cmd_type);
     // 步骤 6.2：解码键长度（VLQ 格式）
     // 检查是否还有数据可读
     if (pos >= ctx.file_size) break;
@@ -349,7 +349,7 @@ static int aofLoadToEngine_mmap(const char* filename, int engine_type) {
     // 返回值：VLQ 编码占用的字节数
     int key_len_bytes = decode_vlq((const uint8_t*)(data + pos), &key_len);
 
-    // fprintf(stderr, "decode: key_len: %zu\n", key_len);
+    kvs_logDebug("decode: key_len: %zu", key_len);
     // 更新解析位置，跳过 VLQ 编码的字节
     pos += key_len_bytes;
 
@@ -362,7 +362,7 @@ static int aofLoadToEngine_mmap(const char* filename, int engine_type) {
 
     // 调用 decode_vlq() 解码值长度
     int val_len_bytes = decode_vlq((const uint8_t*)(data + pos), &val_len);
-    // fprintf(stderr, "decode: val_len: %zu\n", val_len);
+    kvs_logDebug("decode: val_len: %zu", val_len);
 
     // 更新解析位置，跳过 VLQ 编码的字节
     pos += val_len_bytes;
@@ -372,7 +372,7 @@ static int aofLoadToEngine_mmap(const char* filename, int engine_type) {
     // 如果 pos + key_len + val_len 超过文件大小，说明文件格式错误
     if (pos + key_len + val_len + 2 > ctx.file_size) {
       // 打印错误信息
-      fprintf(stderr, "错误：AOF 文件格式错误（超出文件边界）\n");
+      kvs_logError("AOF 文件格式错误（超出文件边界）");
 
       // 关闭 mmap 映射，释放资源
       mmap_close_file(&ctx);
@@ -502,7 +502,7 @@ static int aofLoadToEngine_mmap(const char* filename, int engine_type) {
       // 处理未知命令类型
       default:
         // 打印错误信息，显示未知的命令类型
-        fprintf(stderr, "未知的 AOF 命令类型: %02X\n", cmd_type);
+        kvs_logError("未知的 AOF 命令类型: %02X", cmd_type);
         break;  // 退出 switch
     }
 
@@ -516,7 +516,7 @@ static int aofLoadToEngine_mmap(const char* filename, int engine_type) {
 
   // 步骤 8：打印加载完成信息
   // 显示文件名和已解析的命令数量
-  printf("AOF 文件加载完成: %s (共 %d 条命令)\n", filename, cmd_count);
+  kvs_logInfo("AOF 文件加载完成: %s (共 %d 条命令)", filename, cmd_count);
 
   // 步骤 9：返回成功
   return 0;
@@ -575,7 +575,7 @@ void appendToAofBuffer(int type, const robj* key, const robj* value) {
     // 构造命令数据（使用堆上分配，避免栈溢出）
     char* cmd_data = kvs_malloc(total_needed);  // 在堆上分配缓冲区
     if (!cmd_data) {
-      fprintf(stderr, "AOF错误：无法分配大命令缓冲区\n");
+      kvs_logError("AOF错误：无法分配大命令缓冲区");
       return;
     }
     int pos = 0;
@@ -605,7 +605,7 @@ void appendToAofBuffer(int type, const robj* key, const robj* value) {
 
     // 直接写入大命令
     if (write_all(aof_fd, cmd_data, pos) < 0) {
-      fprintf(stderr, "AOF错误：无法写入大命令: %s\n", strerror(errno));
+      kvs_logError("AOF错误：无法写入大命令: %s", strerror(errno));
     }
 
     // 释放堆上分配的缓冲区
@@ -641,7 +641,7 @@ void appendToAofBuffer(int type, const robj* key, const robj* value) {
     aofBuffer.len += vlen;
   }
 #else
-  fprintf(stderr, "错误：多引擎模式下请使用 appendToAofBufferToEngine()\n");
+  kvs_logError("多引擎模式下请使用 appendToAofBufferToEngine()");
 #endif
 }
 
@@ -655,7 +655,7 @@ int flushAofBuffer() {
   if (aof_len > 0 && aof_fd != -1) {
     ssize_t result = write_all(aof_fd, aofBuffer.buf, aofBuffer.len);
     if (result == -1) {
-      fprintf(stderr, "错误：写入AOF文件失败: %s\n", strerror(errno));
+      kvs_logError("写入AOF文件失败: %s", strerror(errno));
       return -1;
     }
     // 成功写入后，重置缓冲区
@@ -663,7 +663,7 @@ int flushAofBuffer() {
   }
   return 0;
 #else
-  fprintf(stderr, "错误：多引擎模式下请使用引擎特定的flush函数\n");
+  kvs_logError("多引擎模式下请使用引擎特定的flush函数");
   return -1;
 #endif
 }
@@ -699,7 +699,7 @@ static int flushAofBufferToEngine(int engine_type) {
       ssize_t result =
           write_all(target_fd, aof_buf, aofBuffer[engine_type].len);
       if (result == -1) {
-        fprintf(stderr, "错误：写入AOF文件失败: %s\n", strerror(errno));
+        kvs_logError("写入AOF文件失败: %s", strerror(errno));
         return -1;
       }
       // 成功写入后，重置缓冲区
@@ -766,48 +766,48 @@ int start_aof_fsync_process() {
 #if ENABLE_ARRAY
   aof_fd_array = open(aof_filename_array, O_WRONLY | O_CREAT | O_APPEND, 0644);
   if (aof_fd_array == -1) {
-    fprintf(stderr, "错误：无法打开AOF文件 %s\n", aof_filename_array);
+    kvs_logError("无法打开AOF文件 %s", aof_filename_array);
     return -1;
   }
-  printf("Array引擎AOF文件已打开: %s\n", aof_filename_array);
+  kvs_logInfo("Array引擎AOF文件已打开: %s", aof_filename_array);
 #endif
 
 #if ENABLE_HASH
   aof_fd_hash = open(aof_filename_hash, O_WRONLY | O_CREAT | O_APPEND, 0644);
   if (aof_fd_hash == -1) {
-    fprintf(stderr, "错误：无法打开AOF文件 %s\n", aof_filename_hash);
+    kvs_logError("无法打开AOF文件 %s", aof_filename_hash);
     return -1;
   }
-  printf("Hash引擎AOF文件已打开: %s\n", aof_filename_hash);
+  kvs_logInfo("Hash引擎AOF文件已打开: %s", aof_filename_hash);
 #endif
 
 #if ENABLE_RBTREE
   aof_fd_rbtree =
       open(aof_filename_rbtree, O_WRONLY | O_CREAT | O_APPEND, 0644);
   if (aof_fd_rbtree == -1) {
-    fprintf(stderr, "错误：无法打开AOF文件 %s\n", aof_filename_rbtree);
+    kvs_logError("无法打开AOF文件 %s", aof_filename_rbtree);
     return -1;
   }
-  printf("Rbtree引擎AOF文件已打开: %s\n", aof_filename_rbtree);
+  kvs_logInfo("Rbtree引擎AOF文件已打开: %s", aof_filename_rbtree);
 #endif
 
 #if ENABLE_SKIPLIST
   aof_fd_skiplist =
       open(aof_filename_skiplist, O_WRONLY | O_CREAT | O_APPEND, 0644);
   if (aof_fd_skiplist == -1) {
-    fprintf(stderr, "错误：无法打开AOF文件 %s\n", aof_filename_skiplist);
+    kvs_logError("无法打开AOF文件 %s", aof_filename_skiplist);
     return -1;
   }
-  printf("Skiplist引擎AOF文件已打开: %s\n", aof_filename_skiplist);
+  kvs_logInfo("Skiplist引擎AOF文件已打开: %s", aof_filename_skiplist);
 #endif
 #else
   // 单引擎模式：只打开一个AOF文件
   aof_fd = open(aof_filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
   if (aof_fd == -1) {
-    fprintf(stderr, "错误：无法打开AOF文件 %s\n", aof_filename);
+    kvs_logError("无法打开AOF文件 %s", aof_filename);
     return -1;
   }
-  printf("AOF文件已打开: %s\n", aof_filename);
+  kvs_logInfo("AOF文件已打开: %s", aof_filename);
 #endif
 
   // 设置运行标志
@@ -817,7 +817,7 @@ int start_aof_fsync_process() {
   // 创建FSYNC线程
   int result = pthread_create(&fsync_thread, NULL, fsync_thread_func, NULL);
   if (result != 0) {
-    fprintf(stderr, "错误：创建FSYNC线程失败\n");
+    kvs_logError("创建FSYNC线程失败");
 #if ENABLE_MULTI_ENGINE
 #if ENABLE_ARRAY
     if (aof_fd_array != -1) close(aof_fd_array);
@@ -837,7 +837,7 @@ int start_aof_fsync_process() {
     return -1;
   }
 
-  printf("AOF FSYNC后台线程已启动\n");
+  kvs_logInfo("AOF FSYNC后台线程已启动");
   return 0;
 }
 
@@ -869,12 +869,12 @@ void before_sleep() {
  * @return 成功返回0，失败返回-1
  */
 static int aofLoadToEngine(const char* filename, int engine_type) {
-  printf("开始加载AOF文件: %s\n", filename);
+  kvs_logInfo("开始加载AOF文件: %s", filename);
 
   // 检查文件是否存在
   FILE* file = fopen(filename, "rb");
   if (!file) {
-    printf("AOF文件不存在或无法打开: %s\n", filename);
+    kvs_logWarn("AOF文件不存在或无法打开: %s", filename);
     return 0;  // 文件不存在是正常的，返回成功
   }
 
@@ -884,7 +884,7 @@ static int aofLoadToEngine(const char* filename, int engine_type) {
   fseek(file, 0, SEEK_SET);
 
   if (file_size == 0) {
-    printf("AOF文件为空: %s\n", filename);
+    kvs_logWarn("AOF文件为空: %s", filename);
     fclose(file);
     return 0;
   }
@@ -892,7 +892,7 @@ static int aofLoadToEngine(const char* filename, int engine_type) {
   // 分配缓冲区读取整个文件
   char* buffer = (char*)kvs_malloc(file_size);
   if (!buffer) {
-    fprintf(stderr, "无法分配内存来加载AOF文件\n");
+    kvs_logError("无法分配内存来加载AOF文件");
     fclose(file);
     return -1;
   }
@@ -900,7 +900,7 @@ static int aofLoadToEngine(const char* filename, int engine_type) {
   // 读取文件内容
   size_t bytes_read = fread(buffer, 1, file_size, file);
   if (bytes_read != file_size) {
-    fprintf(stderr, "读取AOF文件时发生错误\n");
+    kvs_logError("读取AOF文件时发生错误");
     kvs_free(buffer);
     fclose(file);
     return -1;
@@ -934,7 +934,7 @@ static int aofLoadToEngine(const char* filename, int engine_type) {
     if (key_len > 0) {
       key.ptr = (char*)kvs_malloc(key_len);
       if (!key.ptr) {
-        fprintf(stderr, "无法分配内存来存储键\n");
+        kvs_logError("无法分配内存来存储键");
         kvs_free(buffer);
         return -1;
       }
@@ -953,7 +953,7 @@ static int aofLoadToEngine(const char* filename, int engine_type) {
       }
       value.ptr = (char*)kvs_malloc(val_len);
       if (!value.ptr) {
-        fprintf(stderr, "无法分配内存来存储值\n");
+        kvs_logError("无法分配内存来存储值");
         if (key.ptr) kvs_free(key.ptr);
         kvs_free(buffer);
         return -1;
@@ -1038,7 +1038,7 @@ static int aofLoadToEngine(const char* filename, int engine_type) {
         break;
 
       default:
-        fprintf(stderr, "未知的AOF命令类型: %d\n", cmd_type);
+        kvs_logError("未知的AOF命令类型: %d", cmd_type);
         break;
     }
 
@@ -1186,7 +1186,7 @@ void appendToAofBufferToEngine(int engine_type, int type, const robj* key,
     // 构造命令数据（使用堆上分配，避免栈溢出）
     char* cmd_data = kvs_malloc(total_needed);  // 在堆上分配缓冲区
     if (!cmd_data) {
-      fprintf(stderr, "AOF错误：无法分配大命令缓冲区\n");
+      kvs_logError("AOF错误：无法分配大命令缓冲区");
       return;
     }
     int pos = 0;
@@ -1243,7 +1243,7 @@ void appendToAofBufferToEngine(int engine_type, int type, const robj* key,
 #endif
 
     if (target_fd != -1 && write_all(target_fd, cmd_data, pos) < 0) {
-      fprintf(stderr, "AOF错误：无法写入大命令: %s\n", strerror(errno));
+      kvs_logError("AOF错误：无法写入大命令: %s", strerror(errno));
     }
 
     // 释放堆上分配的缓冲区
