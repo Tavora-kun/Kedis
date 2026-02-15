@@ -1,9 +1,10 @@
-#include "../../include/config.h"
+#include "../../include/kvstore.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
+
 
 /* 全局配置实例 */
 kv_config g_config;
@@ -37,6 +38,11 @@ static config_option config_table[] = {
         .limit.i = {0, 3},
         .default_value = "1",
         .description = "日志级别: 0=DEBUG, 1=INFO, 2=WARN, 3=ERROR"
+    },
+    {
+        "logfile", CONFIG_TYPE_STRING, g_config.logfile,
+        .default_value = "", // 默认 stdout
+        .description = "指定日志文件名 (如为空字符串, 则日志输出到stdout)"
     },
     
     /* 初始化模式 */
@@ -94,6 +100,20 @@ static char *trim(char *str) {
     end = str + strlen(str) - 1;
     while (end > str && isspace((unsigned char)*end)) end--;
     end[1] = '\0';
+    return str;
+}
+
+/* 辅助函数: 去除引号 */
+static char *unquote(char *str) {
+    size_t len = strlen(str);
+    if (len >= 2) {
+        // 检查是否被相同引号包裹 "..." 或 '...'
+        if ((str[0] == '"' && str[len-1] == '"') ||
+            (str[0] == '\'' && str[len-1] == '\'')) {
+            str[len-1] = '\0';  // 去掉尾部引号
+            return str + 1;      // 跳过首部引号
+        }
+    }
     return str;
 }
 
@@ -156,11 +176,11 @@ static int config_set_value(config_option *opt, const char *value) {
             char *endptr;
             long val = strtol(value, &endptr, 10);
             if (*endptr != '\0' || endptr == value) {
-                fprintf(stderr, "Invalid integer value: %s\n", value);
+                kvs_logError("Invalid integer value: %s\n", value);
                 return -1;
             }
             if (val < opt->limit.i.min || val > opt->limit.i.max) {
-                fprintf(stderr, "Value out of range [%d, %d]: %ld\n", 
+                kvs_logError("Value out of range [%d, %d]: %ld\n", 
                         opt->limit.i.min, opt->limit.i.max, val);
                 return -1;
             }
@@ -171,7 +191,7 @@ static int config_set_value(config_option *opt, const char *value) {
         case CONFIG_TYPE_BOOL: {
             bool val;
             if (parse_bool(value, &val) < 0) {
-                fprintf(stderr, "Invalid boolean value: %s (expected yes/no)\n", value);
+                kvs_logError("Invalid boolean value: %s (expected yes/no)\n", value);
                 return -1;
             }
             *(bool *)opt->ptr = val;
@@ -179,17 +199,21 @@ static int config_set_value(config_option *opt, const char *value) {
         }
         
         case CONFIG_TYPE_STRING: {
-            // 直接拷贝到固定缓冲区，无需 malloc
             char *dst = (char *)opt->ptr;
-            strncpy(dst, value, NET_IP_STR_LEN - 1);
-            dst[NET_IP_STR_LEN - 1] = '\0';  // 确保终止
+            if (strlen(value) == 0) {
+                // 空字符串 = 特殊含义（如 stdout）
+                strcpy(dst, "");  // 或设置标志位表示"无日志文件"
+            } else {
+                strncpy(dst, value, CONFIG_STR_LEN - 1);
+                dst[CONFIG_STR_LEN - 1] = '\0'; 
+            }
             break;
         }
         
         case CONFIG_TYPE_ENUM: {
             int val;
             if (parse_enum(value, opt->limit.e.options, &val) < 0) {
-                fprintf(stderr, "Invalid enum value: %s\n", value);
+                kvs_logError("Invalid enum value: %s\n", value);
                 return -1;
             }
             *(int *)opt->ptr = val;
@@ -200,7 +224,7 @@ static int config_set_value(config_option *opt, const char *value) {
         case CONFIG_TYPE_SIZE: {
             uint64_t val;
             if (parse_size(value, &val) < 0) {
-                fprintf(stderr, "Invalid size value: %s\n", value);
+                kvs_logError("Invalid size value: %s\n", value);
                 return -1;
             }
             *(uint64_t *)opt->ptr = val;
@@ -208,7 +232,7 @@ static int config_set_value(config_option *opt, const char *value) {
         }
         
         default:
-            fprintf(stderr, "Unknown config type\n");
+            kvs_logError("Unknown config type\n");
             return -1;
     }
     return 0;
@@ -220,7 +244,7 @@ int kv_config_init(void) {
     
     for (config_option *opt = config_table; opt->name; opt++) {
         if (config_set_value(opt, opt->default_value) < 0) {
-            fprintf(stderr, "Failed to set default for %s\n", opt->name);
+            kvs_logError("Failed to set default for %s\n", opt->name);
             return -1;
         }
     }
@@ -236,7 +260,7 @@ int kv_config_init(void) {
 int kv_config_load(const char *filename) {
     FILE *fp = fopen(filename, "r");
     if (!fp) {
-        fprintf(stderr, "Cannot open config file: %s (%s)\n", 
+        kvs_logError("Cannot open config file: %s (%s)\n", 
                 filename, strerror(errno));
         return -1;
     }
@@ -275,6 +299,10 @@ int kv_config_load(const char *filename) {
         if (sep) {
             *sep = '\0';
             value = trim(sep + 1);
+            /* 去除引号 */
+            if (value) {
+                value = unquote(value);
+            }
         }
         key = trim(key);
         
@@ -286,7 +314,7 @@ int kv_config_load(const char *filename) {
             if (strcasecmp(opt->name, key) == 0) {
                 found = 1;
                 if (config_set_value(opt, value ? value : "") < 0) {
-                    fprintf(stderr, "Error at %s:%d: %s\n", filename, linenum, key);
+                    kvs_logError("Error at %s:%d: %s\n", filename, linenum, key);
                     errors++;
                 }
                 break;
@@ -294,7 +322,7 @@ int kv_config_load(const char *filename) {
         }
         
         if (!found) {
-            fprintf(stderr, "Warning: Unknown config option at %s:%d: %s\n", 
+            kvs_logError("Warning: Unknown config option at %s:%d: %s\n", 
                     filename, linenum, key);
         }
     }

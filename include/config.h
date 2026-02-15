@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define NET_IP_STR_LEN 46 
+#define CONFIG_STR_LEN 50
 
 /* 配置项类型 */
 typedef enum {
@@ -44,20 +44,21 @@ typedef enum {
 /* 全局配置结构体 */
 typedef struct kv_config {
     /* 网络 */
-    char bind_addr[NET_IP_STR_LEN];            /* 绑定IP地址 */
+    char bind_addr[CONFIG_STR_LEN];            /* 绑定IP地址 */
     int port;                   /* 监听端口 */
     
     /* 日志 */
     int log_level;              /* 0=DEBUG, 1=INFO, 2=WARN, 3=ERROR */
+    char logfile[CONFIG_STR_LEN];
     
     /* 初始化 */
     init_mode_t init_mode;      /* 启动时加载方式 */
     
     /* 主从复制 */
     replica_mode_t replica_mode;    /* 主还是从 */
-    char master_host[NET_IP_STR_LEN];          /* 主节点IP（从节点用） */
+    char master_host[CONFIG_STR_LEN];          /* 主节点IP（从节点用） */
     int master_port;            /* 主节点端口（从节点用） */
-    char slave_host[NET_IP_STR_LEN];
+    char slave_host[CONFIG_STR_LEN];
     int slave_port;
     
     /* 持久化 */
