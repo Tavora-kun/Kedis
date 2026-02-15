@@ -11,9 +11,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 #include "../../include/kvs_protocol.h"
 #include "../../include/kvstore.h"
+#include "../../include/config.h"
+
+extern kv_config g_config;
 
 /* ---------------- 常量定义 ---------------- */
 #define MAX_CONNS 100000   // 最大并发连接数
@@ -140,7 +144,7 @@ static void conn_free(struct conn* c) {
 }
 
 /* ---------------- 监听端口 ---------------- */
-static int init_listen(uint16_t port) {
+static int init_listen(uint16_t port, const char* bind_addr) {
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) {
     perror("socket");
@@ -154,7 +158,23 @@ static int init_listen(uint16_t port) {
   struct sockaddr_in addr = {0};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(port);
-  addr.sin_addr.s_addr = INADDR_ANY;
+  /* 解析绑定地址 */
+  if (bind_addr == NULL || strlen(bind_addr) == 0) {
+      /* 默认：监听所有地址 */
+      addr.sin_addr.s_addr = INADDR_ANY;
+      bind_addr = "0.0.0.0";
+  } else if (strcmp(bind_addr, "0.0.0.0") == 0) {
+      /* 显式指定 0.0.0.0 */
+      addr.sin_addr.s_addr = INADDR_ANY;
+  } else {
+      /* 使用 inet_pton 转换指定 IP */
+      if (inet_pton(AF_INET, bind_addr, &addr.sin_addr) != 1) {
+          fprintf(stderr, "Invalid bind address: %s\n", bind_addr);
+          close(fd);
+          return -1;
+      }
+  }
+
 
   if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
     perror("bind");
@@ -175,7 +195,7 @@ static int processCommand(struct conn* c) {
 
 /* --------------  proactor_start：主入口  -------------- */
 int proactor_start(unsigned short port, msg_handler handler) {
-  int listenfd = init_listen(port);
+  int listenfd = init_listen(port, g_config.bind_addr);
   if (listenfd < 0) {
     return -1;
   }

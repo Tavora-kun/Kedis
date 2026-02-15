@@ -5,6 +5,11 @@
 
 #define ENABLE_AOF 0
 
+#define AOF_ENGINE_TYPE_ARRAY 0
+#define AOF_ENGINE_TYPE_HASH 1
+#define AOF_ENGINE_TYPE_RBTREE 2
+#define AOF_ENGINE_TYPE_SKIPLIST 3
+
 typedef struct {
   char buf[AOF_BUF_SIZE];
   int len;

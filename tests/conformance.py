@@ -50,7 +50,7 @@ def to_redis_str(v: Any) -> str:
 class ConformanceTest:
     """多引擎一致性测试框架"""
     
-    def __init__(self, host: str = '172.20.10.2'):
+    def __init__(self, host: str = '127.0.0.1'):
         self.host = host
         self.test_pairs: List[TestPair] = []
         self.work_dir = os.getcwd()

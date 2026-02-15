@@ -5,6 +5,7 @@ LDFLAGS = -L./NtyCo/ -lntyco -lpthread -luring -ldl -ljemalloc
 # 主项目源文件
 SRCS = src/core/kvstore.c \
        src/core/protocol.c \
+	   src/core/config.c \
        src/network/ntyco.c \
        src/network/proactor.c \
        src/engines/kvs_array.c \
@@ -13,7 +14,7 @@ SRCS = src/core/kvstore.c \
        src/engines/kvs_skiplist.c \
        src/persistence/ksf.c \
        src/persistence/aof.c \
-       src/utils/memory_pool.c
+       src/utils/memory_pool.c \
 
 OBJS = $(SRCS:.c=.o)
 
