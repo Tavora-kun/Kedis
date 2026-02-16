@@ -1,4 +1,4 @@
-from resp_client import RawRedisClient, eval_input
+from resp_client import RawRedisClient
 from dataclasses import dataclass, asdict, field
 from typing import List, Dict, Any, Optional
 import json
@@ -137,7 +137,7 @@ class ConformanceTest:
     
     def _eval_expr(self, expr: str) -> Any:
         try:
-            return eval(expr, {"__builtins__": {}}, {})
+            return eval(expr, {"__builtins__": {}}, {"range": range, "chr": chr})
         except Exception as e:
             print(f"表达式错误 '{expr}': {e}")
             return expr
@@ -285,7 +285,7 @@ class ConformanceTest:
         while True:
             expr = input(prompt).strip()
             try:
-                eval(expr, {"__builtins__": {}}, {})
+                eval(expr, {"__builtins__": {}}, {"range": range, "chr": chr})
                 return expr
             except Exception as e:
                 print(f"  [错误] 表达式无效: {e}, 请重新输入")
