@@ -24,7 +24,7 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 256 * 1024);
+    __uint(max_entries, 8 * 1024 * 1024); // 用户态消费跟不上生产:256*1024 -> 8*1024*1024
 } rb SEC(".maps");
 
 SEC("tc")

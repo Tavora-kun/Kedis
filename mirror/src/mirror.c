@@ -26,6 +26,10 @@
 #define EVENT_HEADER 1
 #define EVENT_DATA 2
 
+long long total_complete = 0;
+long long total_sent = 0;
+
+
 struct packet_event {
   __u32 type;
   __u32 src_ip;
@@ -137,12 +141,27 @@ static void get_timestamp(char* buf, size_t len) {
 static void flush_buffer(struct reassembly_buffer *buf) {
   if (!buf || !buf->active || buf->received_len == 0) return;
 
+
+  // [新增] 完整性检查
+    // 如果收到的长度 不等于 头部声明的总长度
+    // 说明中间有丢包，或者包被截断了
+  if (buf->received_len != buf->total_len) {
+    // 记录丢包日志（仅在调试时打开，生产环境可计数）
+    // fprintf(stderr, "[Drop] Flow incomplete: expected %u, got %u. Dropping to keep connection alive.\n", 
+    //         buf->total_len, buf->received_len);
+
+    // 既然这个包坏了，就别发了，直接从哈希表移除，重置状态
+    // 这样虽然丢失了这一个 SET 命令，但 TCP 连接还活着，后续的命令还能发
+    remove_flow(buf);
+    return;
+  }
+
+  
   char src_str[16], dst_str[16];
   inet_ntop(AF_INET, &buf->src_ip, src_str, sizeof(src_str));
   inet_ntop(AF_INET, &buf->dst_ip, dst_str, sizeof(dst_str));
-
-  mirror_logInfo("[Complete] %s:%d -> %s:%d, total: %u bytes", src_str,
-              buf->src_port, dst_str, buf->dst_port, buf->received_len);
+  mirror_logInfo("[Complete] %s:%d -> %s:%d, total: %u bytes", src_str, buf->src_port, dst_str, buf->dst_port, buf->received_len);
+  total_complete += buf->received_len;
 
 //   // 写入日志
 //   if (log_fd >= 0) {
@@ -165,9 +184,15 @@ static void flush_buffer(struct reassembly_buffer *buf) {
         close(slave_fd);
         slave_fd = -1;
         break;
+      } else if (n == 0) {
+        mirror_logError("Client disconnect");
+        close(slave_fd);
+        slave_fd = -1;
+        break;
       }
       sent += n;
     }
+    total_sent += sent;
     mirror_logInfo("Forwarded %zd bytes to slave\n", sent);
   }
 
@@ -196,7 +221,7 @@ static int handle_event(void* ctx, void* data, size_t data_sz) {
     buf->active = 1;
     buf->total_len = e->payload_len;
     buf->received_len = 0;
-    mirror_logDebug("初始化: reasm.total_len == payload_len: %u", buf->total_len);
+    // mirror_logDebug("初始化: buf->total_len == payload_len: %u", buf->total_len);
     if (buf->total_len > MAX_PAYLOAD) {
         mirror_logWarn("Payload too large (%u), truncating", buf->total_len);
         buf->total_len = MAX_PAYLOAD;
@@ -275,7 +300,9 @@ static void cleanup_flows() { // 清理整个 table
 }
 
 static void sig_handler(int sig) {
-  mirror_logInfo("\n收到信号 %d，正在退出...", sig);
+  debug("total_complete: %lld\n", total_complete);
+  debug("total_sent: %lld\n", total_sent);
+  fprintf(stderr, "收到信号 %d，正在退出...\n", sig);
   exiting = true;
 }
 
@@ -355,7 +382,7 @@ int main(int argc, char** argv) {
     goto cleanup;
   }
 
-  fprintf(stderr, "Running on %s. Press Ctrl+C to exit.", argv[1]);
+  fprintf(stderr, "Running on %s. Press Ctrl+C to exit.\n", argv[1]);
 
   while (!exiting) {
     err = ring_buffer__poll(rb, 100);
@@ -367,9 +394,7 @@ int main(int argc, char** argv) {
 
   // 退出前刷新(送走)并释放剩余数据
   cleanup_flows();
-
-  
-  fprintf(stderr, "\nDetaching...");
+  fprintf(stderr, "\nDetaching...\n");
 
 //   if (log_fd >= 0) {
 //     get_timestamp(timestamp, sizeof(timestamp));

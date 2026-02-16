@@ -58,7 +58,7 @@ int kvs_resp_feed(struct conn* c) {
         // fprintf(stderr, "-->hdr: rbuf: %s\n", c->rbuf);
         if (c->rbuf[c->parse_done] != '*') {
             // fprintf(stderr, "rbuf: %*s\nparse_>done后: %*s\n", IOP_SIZE, c->rbuf, IOP_SIZE - c->parse_done, c->rbuf + c->parse_done);
-            kvs_logError("the first char must be *");
+            kvs_logError("The first char must be *");
           goto error;  // 协议错误：不是 Array 格式
         }
 
@@ -77,7 +77,7 @@ int kvs_resp_feed(struct conn* c) {
         // fprintf(stderr, "c->argc=%d\n", c->argc);
         // 检查解析是否成功（endptr 应该指向 \r）
         if (endptr != end) {
-          kvs_logError("argc convert error");
+          kvs_logError("Argc convert error");
           goto error;  // 解析错误：数字格式错误
         }
         
@@ -97,7 +97,7 @@ int kvs_resp_feed(struct conn* c) {
         
         // fprintf(stderr, "c->parse_down:这个位置是:%s\n", c->rbuf[c->parse_done]);
         if (c->rbuf[c->parse_done] != '$') {
-          kvs_logError("bulk should start with $");
+          kvs_logError("Bulk should start with $");
           goto error; // 协议错误：不是 Bulk String 格式
         }
         // fprintf(stderr, "-->bulk_len1\n");
@@ -124,7 +124,7 @@ int kvs_resp_feed(struct conn* c) {
         
         // 检查解析是否成功（endptr 应该指向 \r）
         if (endptr != end) {
-          kvs_logError("bulk len parse\n");
+          kvs_logError("Bulk len convert error");
           goto error;
           // return -1;  // 解析错误：数字格式错误
         }
@@ -135,7 +135,7 @@ int kvs_resp_feed(struct conn* c) {
         
         // 处理 NULL bulk string（bulk_len == -1）
         if (c->bulk_len == (size_t)-1) {
-            kvs_logError("NULL STRING?\n");
+          kvs_logError("服务端不应该收到 $-1\\r\\n\n");
           c->argv[c->argc_done].ptr = NULL;  // NULL 指针
           c->argv[c->argc_done].len = 0;     // 长度为 0
           c->argc_done++;                    // 已解析参数个数加 1
@@ -150,14 +150,14 @@ int kvs_resp_feed(struct conn* c) {
         
         // 检查 bulk_len 是否超过最大限制
         if (c->bulk_len > MAX_SEG_SIZE) {
-          kvs_logError("bulk too big\n");
+          kvs_logError("Bulk too big");
           goto error;  // 数据过大，拒绝处理
         }
         
         // 分配内存存储 bulk data（+1 用于 null terminator）
         c->argv[c->argc_done].ptr = kvs_malloc(c->bulk_len + 1);
         if (!c->argv[c->argc_done].ptr) {
-          kvs_logError("bulk malloc fail\n");
+          kvs_logError("Bulk malloc fail");
           goto error;  // 内存分配失败
         }
         c->argv[c->argc_done].len = c->bulk_len;        // 记录长度
@@ -217,7 +217,7 @@ int kvs_resp_feed(struct conn* c) {
           // 检查 \r\n 是否正确
           if (c->rbuf[c->parse_done] != '\r' ||
             c->rbuf[c->parse_done + 1] != '\n') {
-              kvs_logError("bulk should end with \\r\\n\n");
+              kvs_logError("Bulk should end with \\r\\n");
               goto error;  // 协议错误：缺少 \r\n
           }
           // fprintf(stderr, "data:--> 3\n");

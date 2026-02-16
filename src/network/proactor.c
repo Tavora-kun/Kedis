@@ -280,7 +280,6 @@ int proactor_start(unsigned short port, msg_handler handler) {
 
           c->rlen += res;  // 累加接收的字节数（不是覆盖）
           c->parse_done = 0;
-          // fprintf(stderr, "=========数据包来啦!整个缓冲区哦!\n%*s\n", IOP_SIZE,c->rbuf); // 调用 kvs_resp_feed 解析数据
           
           int ret = kvs_resp_feed(c);
           // fprintf(stderr, "==> ret = %d\n", ret);
