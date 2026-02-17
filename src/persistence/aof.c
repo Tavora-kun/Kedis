@@ -96,9 +96,6 @@ static int fsync_running = 0;
 static time_t last_fsync_time = 0;
 static time_t last_write_time = 0;
 
-// 阈值：超过此大小的命令将绕过缓冲区直接写入
-#define LARGE_CMD_THRESHOLD (AOF_BUF_SIZE / 2)
-
 /**
  * 安全写入函数 - 确保所有数据都被写入
  * @param fd 文件描述符
@@ -384,15 +381,15 @@ static int aofLoadToEngine_mmap(const char* filename, int engine_type) {
     // 步骤 6.5：获取 key 和 value 的指针（直接引用映射内存，不拷贝）
     // key_ptr 指向映射内存中 key 的起始位置
     robj key = {0};
-    key.ptr = (key_len > 0) ? (data + pos) : NULL;
-    key.len = (key_len > 0) ? key_len : 0;
+    key.ptr = (key_len >= 0) ? (data + pos) : NULL;
+    key.len = (key_len >= 0) ? key_len : 0;
     // 更新解析位置，跳过 key 的内容
     pos += key_len + 1; // 还需要跳过 \0
 
     // val_ptr 指向映射内存中 value 的起始位置
     robj value = {0};
-    value.ptr = (val_len > 0) ? (data + pos) : NULL;
-    value.len = (val_len > 0) ? val_len : 0;
+    value.ptr = (val_len >= 0) ? (data + pos) : NULL;
+    value.len = (val_len >= 0) ? val_len : 0;
 
     // 更新解析位置，跳过 value 的内容
     pos += val_len + 1; // 还需要跳过 \0
@@ -408,23 +405,23 @@ static int aofLoadToEngine_mmap(const char* filename, int engine_type) {
 #if ENABLE_MULTI_ENGINE
         // 多引擎模式：根据 engine_type 调用相应的 SET 函数
         // 直接传递映射内存指针，引擎内部会分配内存并拷贝数据
-        if (engine_type == 0) {
-// engine_type == 0 表示 Array 引擎
+        if (engine_type == AOF_ENGINE_TYPE_ARRAY) {
+// engine_type == AOF_ENGINE_TYPE_ARRAY 表示 Array 引擎
 #if ENABLE_ARRAY
           kvs_array_set(&array_engine, &key, &value);
 #endif
-        } else if (engine_type == 1) {
-// engine_type == 1 表示 Hash 引擎
+        } else if (engine_type == AOF_ENGINE_TYPE_HASH) {
+// engine_type == AOF_ENGINE_TYPE_HASH 表示 Hash 引擎
 #if ENABLE_HASH
           kvs_hash_set(&hash_engine, &key, &value);
 #endif
-        } else if (engine_type == 2) {
-// engine_type == 2 表示 Rbtree 引擎
+        } else if (engine_type == AOF_ENGINE_TYPE_RBTREE) {
+// engine_type == AOF_ENGINE_TYPE_RBTREE 表示 Rbtree 引擎
 #if ENABLE_RBTREE
           kvs_rbtree_set(&rbtree_engine, &key, &value);
 #endif
-        } else if (engine_type == 3) {
-// engine_type == 3 表示 Skiplist 引擎
+        } else if (engine_type == AOF_ENGINE_TYPE_SKIPLIST) {
+// engine_type == AOF_ENGINE_TYPE_SKIPLIST 表示 Skiplist 引擎
 #if ENABLE_SKIPLIST
           kvs_skiplist_set(&skiplist_engine, &key, &value);
 #endif
@@ -440,23 +437,23 @@ static int aofLoadToEngine_mmap(const char* filename, int engine_type) {
 #if ENABLE_MULTI_ENGINE
         // 多引擎模式：根据 engine_type 调用相应的 MOD 函数
         // 直接传递映射内存指针，引擎内部会分配内存并拷贝数据
-        if (engine_type == 0) {
-// engine_type == 0 表示 Array 引擎
+        if (engine_type == AOF_ENGINE_TYPE_ARRAY) {
+// engine_type == AOF_ENGINE_TYPE_ARRAY 表示 Array 引擎
 #if ENABLE_ARRAY
           kvs_array_mod(&array_engine, &key, &value);
 #endif
-        } else if (engine_type == 1) {
-// engine_type == 1 表示 Hash 引擎
+        } else if (engine_type == AOF_ENGINE_TYPE_HASH) {
+// engine_type == AOF_ENGINE_TYPE_HASH 表示 Hash 引擎
 #if ENABLE_HASH
           kvs_hash_mod(&hash_engine, &key, &value);
 #endif
-        } else if (engine_type == 2) {
-// engine_type == 2 表示 Rbtree 引擎
+        } else if (engine_type == AOF_ENGINE_TYPE_RBTREE) {
+// engine_type == AOF_ENGINE_TYPE_RBTREE 表示 Rbtree 引擎
 #if ENABLE_RBTREE
           kvs_rbtree_mod(&rbtree_engine, &key, &value);
 #endif
-        } else if (engine_type == 3) {
-// engine_type == 3 表示 Skiplist 引擎
+        } else if (engine_type == AOF_ENGINE_TYPE_SKIPLIST) {
+// engine_type == AOF_ENGINE_TYPE_SKIPLIST 表示 Skiplist 引擎
 #if ENABLE_SKIPLIST
           kvs_skiplist_mod(&skiplist_engine, &key, &value);
 #endif
@@ -472,23 +469,23 @@ static int aofLoadToEngine_mmap(const char* filename, int engine_type) {
 #if ENABLE_MULTI_ENGINE
         // 多引擎模式：根据 engine_type 调用相应的 DEL 函数
         // 直接传递映射内存指针，引擎内部会分配内存并拷贝数据
-        if (engine_type == 0) {
-// engine_type == 0 表示 Array 引擎
+        if (engine_type == AOF_ENGINE_TYPE_ARRAY) {
+// engine_type == AOF_ENGINE_TYPE_ARRAY 表示 Array 引擎
 #if ENABLE_ARRAY
           kvs_array_del(&array_engine, &key);
 #endif
-        } else if (engine_type == 1) {
-// engine_type == 1 表示 Hash 引擎
+        } else if (engine_type == AOF_ENGINE_TYPE_HASH) {
+// engine_type == AOF_ENGINE_TYPE_HASH 表示 Hash 引擎
 #if ENABLE_HASH
           kvs_hash_del(&hash_engine, &key);
 #endif
-        } else if (engine_type == 2) {
-// engine_type == 2 表示 Rbtree 引擎
+        } else if (engine_type == AOF_ENGINE_TYPE_RBTREE) {
+// engine_type == AOF_ENGINE_TYPE_RBTREE 表示 Rbtree 引擎
 #if ENABLE_RBTREE
           kvs_rbtree_del(&rbtree_engine, &key);
 #endif
-        } else if (engine_type == 3) {
-// engine_type == 3 表示 Skiplist 引擎
+        } else if (engine_type == AOF_ENGINE_TYPE_SKIPLIST) {
+// engine_type == AOF_ENGINE_TYPE_SKIPLIST 表示 Skiplist 引擎
 #if ENABLE_SKIPLIST
           kvs_skiplist_del(&skiplist_engine, &key);
 #endif
@@ -678,19 +675,19 @@ static int flushAofBufferToEngine(int engine_type) {
   char* aof_buf = aofBuffer[engine_type].buf;
   if (aofBuffer[engine_type].len > 0) {
     int target_fd = -1;
-    if (engine_type == 0) {
+    if (engine_type == AOF_ENGINE_TYPE_ARRAY) {
 #if ENABLE_ARRAY
       target_fd = aof_fd_array;
 #endif
-    } else if (engine_type == 1) {
+    } else if (engine_type == AOF_ENGINE_TYPE_HASH) {
 #if ENABLE_HASH
       target_fd = aof_fd_hash;
 #endif
-    } else if (engine_type == 2) {
+    } else if (engine_type == AOF_ENGINE_TYPE_RBTREE) {
 #if ENABLE_RBTREE
       target_fd = aof_fd_rbtree;
 #endif
-    } else if (engine_type == 3) {
+    } else if (engine_type == AOF_ENGINE_TYPE_SKIPLIST) {
 #if ENABLE_SKIPLIST
       target_fd = aof_fd_skiplist;
 #endif
@@ -967,19 +964,19 @@ static int aofLoadToEngine(const char* filename, int engine_type) {
     switch (cmd_type) {
       case AOF_CMD_SET:
 #if ENABLE_MULTI_ENGINE
-        if (engine_type == 0) {
+        if (engine_type == AOF_ENGINE_TYPE_ARRAY) {
 #if ENABLE_ARRAY
           kvs_array_set(&array_engine, &key, &value);
 #endif
-        } else if (engine_type == 1) {
+        } else if (engine_type == AOF_ENGINE_TYPE_HASH) {
 #if ENABLE_HASH
           kvs_hash_set(&hash_engine, &key, &value);
 #endif
-        } else if (engine_type == 2) {
+        } else if (engine_type == AOF_ENGINE_TYPE_RBTREE) {
 #if ENABLE_RBTREE
           kvs_rbtree_set(&rbtree_engine, &key, &value);
 #endif
-        } else if (engine_type == 3) {
+        } else if (engine_type == AOF_ENGINE_TYPE_SKIPLIST) {
 #if ENABLE_SKIPLIST
           kvs_skiplist_set(&skiplist_engine, &key, &value);
 #endif
@@ -991,19 +988,19 @@ static int aofLoadToEngine(const char* filename, int engine_type) {
 
       case AOF_CMD_MOD:
 #if ENABLE_MULTI_ENGINE
-        if (engine_type == 0) {
+        if (engine_type == AOF_ENGINE_TYPE_ARRAY) {
 #if ENABLE_ARRAY
           kvs_array_mod(&array_engine, &key, &value);
 #endif
-        } else if (engine_type == 1) {
+        } else if (engine_type == AOF_ENGINE_TYPE_HASH) {
 #if ENABLE_HASH
           kvs_hash_mod(&hash_engine, &key, &value);
 #endif
-        } else if (engine_type == 2) {
+        } else if (engine_type == AOF_ENGINE_TYPE_RBTREE) {
 #if ENABLE_RBTREE
           kvs_rbtree_mod(&rbtree_engine, &key, &value);
 #endif
-        } else if (engine_type == 3) {
+        } else if (engine_type == AOF_ENGINE_TYPE_SKIPLIST) {
 #if ENABLE_SKIPLIST
           kvs_skiplist_mod(&skiplist_engine, &key, &value);
 #endif
@@ -1015,19 +1012,19 @@ static int aofLoadToEngine(const char* filename, int engine_type) {
 
       case AOF_CMD_DEL:
 #if ENABLE_MULTI_ENGINE
-        if (engine_type == 0) {
+        if (engine_type == AOF_ENGINE_TYPE_ARRAY) {
 #if ENABLE_ARRAY
           kvs_array_del(&array_engine, &key);
 #endif
-        } else if (engine_type == 1) {
+        } else if (engine_type == AOF_ENGINE_TYPE_HASH) {
 #if ENABLE_HASH
           kvs_hash_del(&hash_engine, &key);
 #endif
-        } else if (engine_type == 2) {
+        } else if (engine_type == AOF_ENGINE_TYPE_RBTREE) {
 #if ENABLE_RBTREE
           kvs_rbtree_del(&rbtree_engine, &key);
 #endif
-        } else if (engine_type == 3) {
+        } else if (engine_type == AOF_ENGINE_TYPE_SKIPLIST) {
 #if ENABLE_SKIPLIST
           kvs_skiplist_del(&skiplist_engine, &key);
 #endif
@@ -1060,22 +1057,22 @@ int aofLoadAll() {
 #if ENABLE_MULTI_ENGINE
 // 多引擎模式：加载所有引擎的AOF文件
 #if ENABLE_ARRAY
-  if (aofLoadToEngine(aof_filename_array, 0) != 0) {
+  if (aofLoadToEngine(aof_filename_array, AOF_ENGINE_TYPE_ARRAY) != 0) {
     return -1;
   }
 #endif
 #if ENABLE_HASH
-  if (aofLoadToEngine(aof_filename_hash, 1) != 0) {
+  if (aofLoadToEngine(aof_filename_hash, AOF_ENGINE_TYPE_HASH) != 0) {
     return -1;
   }
 #endif
 #if ENABLE_RBTREE
-  if (aofLoadToEngine(aof_filename_rbtree, 2) != 0) {
+  if (aofLoadToEngine(aof_filename_rbtree, AOF_ENGINE_TYPE_RBTREE) != 0) {
     return -1;
   }
 #endif
 #if ENABLE_SKIPLIST
-  if (aofLoadToEngine(aof_filename_skiplist, 3) != 0) {
+  if (aofLoadToEngine(aof_filename_skiplist, AOF_ENGINE_TYPE_SKIPLIST) != 0) {
     return -1;
   }
 #endif
@@ -1100,7 +1097,7 @@ int aofLoadAll_mmap() {
 // 多引擎模式：加载所有引擎的 AOF 文件
 // 步骤 1：加载 Array 引擎的 AOF 文件
 #if ENABLE_ARRAY
-  if (aofLoadToEngine_mmap(aof_filename_array, 0) != 0) {
+  if (aofLoadToEngine_mmap(aof_filename_array, AOF_ENGINE_TYPE_ARRAY) != 0) {
     // 加载失败，返回错误
     return -1;
   }
@@ -1108,7 +1105,7 @@ int aofLoadAll_mmap() {
 
 // 步骤 2：加载 Hash 引擎的 AOF 文件
 #if ENABLE_HASH
-  if (aofLoadToEngine_mmap(aof_filename_hash, 1) != 0) {
+  if (aofLoadToEngine_mmap(aof_filename_hash, AOF_ENGINE_TYPE_HASH) != 0) {
     // 加载失败，返回错误
     return -1;
   }
@@ -1116,7 +1113,7 @@ int aofLoadAll_mmap() {
 
 // 步骤 3：加载 Rbtree 引擎的 AOF 文件
 #if ENABLE_RBTREE
-  if (aofLoadToEngine_mmap(aof_filename_rbtree, 2) != 0) {
+  if (aofLoadToEngine_mmap(aof_filename_rbtree, AOF_ENGINE_TYPE_RBTREE) != 0) {
     // 加载失败，返回错误
     return -1;
   }
@@ -1124,7 +1121,7 @@ int aofLoadAll_mmap() {
 
 // 步骤 4：加载 Skiplist 引擎的 AOF 文件
 #if ENABLE_SKIPLIST
-  if (aofLoadToEngine_mmap(aof_filename_skiplist, 3) != 0) {
+  if (aofLoadToEngine_mmap(aof_filename_skiplist, AOF_ENGINE_TYPE_SKIPLIST) != 0) {
     // 加载失败，返回错误
     return -1;
   }
@@ -1151,19 +1148,6 @@ void appendToAofBufferToEngine(int engine_type, int type, const robj* key,
   if (type != AOF_CMD_DEL && (!key || !value || !key->ptr || !value->ptr))
     return;
   if (type == AOF_CMD_DEL && (!key || !key->ptr)) return;
-
-  // REPLICATION BROADCAST
-  // char cmd_text[4096];
-  // if (type == AOF_CMD_SET) {
-  //     snprintf(cmd_text, sizeof(cmd_text), "SET %s %s", key, value);
-  //     replication_feed_slaves(cmd_text);
-  // } else if (type == AOF_CMD_MOD) {
-  //     snprintf(cmd_text, sizeof(cmd_text), "MOD %s %s", key, value);
-  //     replication_feed_slaves(cmd_text);
-  // } else if (type == AOF_CMD_DEL) {
-  //     snprintf(cmd_text, sizeof(cmd_text), "DEL %s", key);
-  //     replication_feed_slaves(cmd_text);
-  // }
 
   char* aof_buf = aofBuffer[engine_type].buf;
   // printf("-->aof 1\n");
@@ -1208,6 +1192,11 @@ void appendToAofBufferToEngine(int engine_type, int type, const robj* key,
       pos += klen;
       cmd_data[pos] = '\0';
       pos++;
+    } else if (klen == 0) {
+        cmd_data[pos] = '\0';
+        pos++;
+    } else {
+        kvs_logError("AOF 大命令写入: klen < 0");
     }
 
     // 添加值内容
@@ -1216,24 +1205,30 @@ void appendToAofBufferToEngine(int engine_type, int type, const robj* key,
       pos += vlen;
       cmd_data[pos] = '\0';
       pos++;
+    } else if (vlen == 0) {
+        // value 为 NULL, 但也得填上 \0, 这是它作为字符串的义务
+      cmd_data[pos] = '\0';
+      pos++;
+    } else {
+      kvs_logError("AOF 大命令写入: vlen < 0");
     }
 
     // 直接写入大命令到对应引擎的AOF文件
     int target_fd = -1;
 #if ENABLE_MULTI_ENGINE
-    if (engine_type == 0) {
+    if (engine_type == AOF_ENGINE_TYPE_ARRAY) {
 #if ENABLE_ARRAY
       target_fd = aof_fd_array;
 #endif
-    } else if (engine_type == 1) {
+    } else if (engine_type == AOF_ENGINE_TYPE_HASH) {
 #if ENABLE_HASH
       target_fd = aof_fd_hash;
 #endif
-    } else if (engine_type == 2) {
+    } else if (engine_type == AOF_ENGINE_TYPE_RBTREE) {
 #if ENABLE_RBTREE
       target_fd = aof_fd_rbtree;
 #endif
-    } else if (engine_type == 3) {
+    } else if (engine_type == AOF_ENGINE_TYPE_SKIPLIST) {
 #if ENABLE_SKIPLIST
       target_fd = aof_fd_skiplist;
 #endif
@@ -1245,10 +1240,10 @@ void appendToAofBufferToEngine(int engine_type, int type, const robj* key,
     if (target_fd != -1 && write_all(target_fd, cmd_data, pos) < 0) {
       kvs_logError("AOF错误：无法写入大命令: %s", strerror(errno));
     }
-
     // 释放堆上分配的缓冲区
     kvs_free(cmd_data);
     return;
+
   } else {
 
     // [小命令]: 尝试追加到缓冲区
@@ -1270,18 +1265,30 @@ void appendToAofBufferToEngine(int engine_type, int type, const robj* key,
   
     // 添加键内容
     if (klen > 0) {
-      memcpy(aof_buf + aofBuffer[engine_type].len, key->ptr, klen);
-      aofBuffer[engine_type].len += klen;
-      aof_buf[aofBuffer[engine_type].len] = '\0';
-      aofBuffer[engine_type].len++;
+        memcpy(aof_buf + aofBuffer[engine_type].len, key->ptr, klen);
+        aofBuffer[engine_type].len += klen;
+        aof_buf[aofBuffer[engine_type].len] = '\0';
+        aofBuffer[engine_type].len++;
+    } else if (klen == 0) {
+        debug("klen == 0");
+        aof_buf[aofBuffer[engine_type].len] = '\0';
+        aofBuffer[engine_type].len++;
+    } else {
+        kvs_logError("AOF 写 aof_buffer: klen < 0");
     }
     
     // 添加值内容
     if (vlen > 0) {
-      memcpy(aof_buf + aofBuffer[engine_type].len, value->ptr, vlen);
-      aofBuffer[engine_type].len += vlen;
-      aof_buf[aofBuffer[engine_type].len] = '\0';
-      aofBuffer[engine_type].len++;
+        memcpy(aof_buf + aofBuffer[engine_type].len, value->ptr, vlen);
+        aofBuffer[engine_type].len += vlen;
+        aof_buf[aofBuffer[engine_type].len] = '\0';
+        aofBuffer[engine_type].len++;
+    } else if (vlen == 0) {
+        debug("vlen == 0");
+        aof_buf[aofBuffer[engine_type].len] = '\0';
+        aofBuffer[engine_type].len++;
+    } else {
+        kvs_logError("AOF 写 aof_buffer: vlen < 0");
     }
   }
 }
