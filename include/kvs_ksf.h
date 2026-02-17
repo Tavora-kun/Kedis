@@ -1,7 +1,7 @@
 #ifndef __KVS_KSF_H__
 #define __KVS_KSF_H__
 
-#include "kvs_constants.h"
+#include "kvstore.h"
 
 // KSF持久化相关函数声明
 int ksfSave(const char *filename);  // 保存KSF快照

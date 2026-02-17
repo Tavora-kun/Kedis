@@ -1,7 +1,7 @@
 #ifndef __KVS_AOF_H__
 #define __KVS_AOF_H__
 
-#include "kvs_constants.h"
+#include "kvstore.h"
 
 #define ENABLE_AOF 0
 
@@ -9,6 +9,20 @@
 #define AOF_ENGINE_TYPE_HASH 1
 #define AOF_ENGINE_TYPE_RBTREE 2
 #define AOF_ENGINE_TYPE_SKIPLIST 3
+
+
+// 持久化配置
+#define INCREMENTAL_PERSISTENCE 1
+#define AOF_BUF_SIZE (8*1024*1024)  // 8MB AOF缓冲区
+#define AOF_SYNC_INTERVAL 1       // AOF同步间隔（秒）
+
+// AOF命令码定义
+#define AOF_CMD_SET 1
+#define AOF_CMD_MOD 2
+#define AOF_CMD_DEL 3
+
+// 阈值：超过此大小的命令将绕过缓冲区直接写入
+#define LARGE_CMD_THRESHOLD (AOF_BUF_SIZE / 2)
 
 typedef struct {
   char buf[AOF_BUF_SIZE];

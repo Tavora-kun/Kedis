@@ -1,7 +1,7 @@
 #ifndef __KVS_PROTOCOL_H__
 #define __KVS_PROTOCOL_H__
 
-#include "kvs_constants.h"
+#include "kvstore.h"
 #include "kvs_network.h"
 
 /* ---------------- 返回值定义 ---------------- */

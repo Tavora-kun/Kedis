@@ -1,7 +1,7 @@
 #ifndef __KVS_HASH_H__
 #define __KVS_HASH_H__
 
-#include "kvs_constants.h"
+#include "kvstore.h"
 #include "kvs_network.h"
 
 #if ENABLE_HASH

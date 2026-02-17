@@ -11,7 +11,25 @@
 #include <pthread.h>
 #include <unistd.h>
 
-#include "kvs_constants.h"
+// 引擎启用开关
+#define ENABLE_ARRAY		1
+#define ENABLE_RBTREE		1
+#define ENABLE_HASH			1
+#define ENABLE_SKIPLIST		1
+
+// 网络模型定义
+#define NETWORK_REACTOR 	0
+#define NETWORK_PROACTOR	1
+#define NETWORK_NTYCO		2
+
+// 当前选择的网络模型
+#define NETWORK_SELECT		NETWORK_PROACTOR
+
+// 多引擎模式开关：0=单引擎模式（按优先级选择），1=多引擎模式（同时启用所有引擎）
+#define ENABLE_MULTI_ENGINE	1
+// 是否使用mmap加载数据文件(ksf, 快照)
+#define ENABLE_MMAP 1
+
 #include "config.h"
 
 #include "kvs_network.h"
@@ -28,6 +46,7 @@
 
 #include "memory_pool.h"
 #include "kvs_log.h"
+
 
 
 void* kvs_calloc(size_t num, size_t size);

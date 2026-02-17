@@ -2,7 +2,6 @@
 #define __KVS_NETWORK_H__
 
 #include <stddef.h>
-#include "kvs_constants.h"
 
 /* ---------------- 常量定义 ---------------- */
 #define IOP_SIZE (4 * 1024)               // 每次 recv/send 的帧大小（16 KB）
