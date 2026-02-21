@@ -298,6 +298,83 @@ e 60 --data-size 128 --key-minimum 1 --key-maximum 524288 --hit-rate 0.8
 
 ![image-20260212191116300](README.assets/image-20260212191116300.png)
 
+### 持久化性能数据
+
+#### 配置文件选项
+
+仅列出可能影响性能的选项
+
+```bash
+logfile ""
+log-level 2
+
+aof-enabled yes
+auto-save-enabled 
+auto-save-seconds 10
+auto-save-changes 1000
+```
+
+#### 测试工具和选项
+
+详见`tests/pers_benchmark.sh`
+
+```bash
+# --------------------- 配置参数 ---------------------
+HOST="127.0.0.1"
+PORT="8888"
+THREADS=8
+CONNECTIONS_PER_THREAD=50
+DATA_SIZE=128
+KEY_PREFIX="kv_"
+TOTAL_KEYS=1000000
+KEY_MIN=1
+KEY_MAX=1000000
+
+# 计算每个连接需要处理的请求数
+REQUESTS_PER_CONN=$((TOTAL_KEYS / (THREADS * CONNECTIONS_PER_THREAD)))
+
+# 输出目录
+OUTPUT_DIR="./sset_benchmark_results"
+mkdir -p "${OUTPUT_DIR}"
+
+# 使用SSET作为测试命令
+TEST_CMD="SSET"
+
+
+memtier_benchmark \
+    -s ${HOST} \
+    -p ${PORT} \
+    --command="${TEST_CMD} __key__ __data__" \
+    --command-ratio=1 \
+    --command-key-pattern=P \
+    -t ${THREADS} \
+    -c ${CONNECTIONS_PER_THREAD} \
+    -n ${REQUESTS_PER_CONN} \
+    -d ${DATA_SIZE} \
+    --key-prefix=${KEY_PREFIX} \
+    --key-minimum=${KEY_MIN} \
+    --key-maximum=${KEY_MAX} \
+    --hide-histogram \
+    --hdr-file-prefix="${OUTPUT_DIR}/${CONFIG_NAME}_hdr" \
+    --json-out-file="${OUTPUT_DIR}/${CONFIG_NAME}_result.json" \
+    --print-percentiles=50,90,95,99,99.9 \
+    2>&1 | tee "${OUTPUT_DIR}/${CONFIG_NAME}_output.log"
+```
+
+#### 测试结果
+
+<img src="README.assets/image-20260221204018087.png" alt="image-20260221204018087" style="zoom: 67%;" />
+
+<img src="README.assets/image-20260221204037592.png" alt="image-20260221204037592" style="zoom: 67%;" />
+
+<img src="README.assets/image-20260221204053473.png" alt="image-20260221204053473" style="zoom:67%;" />
+
+<img src="README.assets/image-20260221204109200.png" alt="image-20260221204109200" style="zoom:67%;" />
+
+<img src="README.assets/image-20260221204150706.png" alt="image-20260221204150706" style="zoom:67%;" />
+
+<img src="README.assets/image-20260221204215237.png" alt="image-20260221204215237" style="zoom: 67%;" />
+
 
 
 ## Contributing
