@@ -103,11 +103,11 @@ static void post_accept(struct io_uring* ring, int listenfd) {
   io_uring_sqe_set_data(sqe, dummy);
 }
 
-/* ---------------- 提交异步 close ---------------- */
-static void post_close(struct io_uring* ring, struct conn* c) {
-  struct io_uring_sqe* sqe = sqe_prep(ring, c);
-  io_uring_prep_close(sqe, c->fd);
-}
+// /* ---------------- 提交异步 close ---------------- */
+// static void post_close(struct io_uring* ring, struct conn* c) {
+//   struct io_uring_sqe* sqe = sqe_prep(ring, c);
+//   io_uring_prep_close(sqe, c->fd);
+// }
 /* ---------------- 提交异步 recv ---------------- */
 static void post_recv_frame(struct io_uring* ring, struct conn* c) {
   // 获取一个 SQE（提交队列条目）
