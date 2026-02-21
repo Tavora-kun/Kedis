@@ -8,6 +8,13 @@
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
+// TC 返回值定义
+#define TC_ACT_UNSPEC      -1 // 使用默认行为
+#define TC_ACT_OK           0 // 允许通过
+#define TC_ACT_RECLASSIFY   1 // 重新分类
+#define TC_ACT_SHOT         2 // 丢弃数据包
+#define TC_ACT_PIPE         3 // 传递到下一个 action
+
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 8 * 1024 * 1024); // 用户态消费跟不上生产:256*1024 -> 8*1024*1024
@@ -20,31 +27,31 @@ int mirror_forward(struct __sk_buff *skb)
     void *data = (void *)(long)skb->data;
 
     struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end) return 0;
-    if (eth->h_proto != bpf_htons(ETH_P_IP)) return 0;
+    if ((void *)(eth + 1) > data_end) return TC_ACT_OK;
+    if (eth->h_proto != bpf_htons(ETH_P_IP)) return TC_ACT_OK;
 
     struct iphdr *ip = (void *)(eth + 1);
-    if ((void *)(ip + 1) > data_end) return 0;
-    if (ip->protocol != IPPROTO_TCP) return 0;
+    if ((void *)(ip + 1) > data_end) return TC_ACT_OK;
+    if (ip->protocol != IPPROTO_TCP) return TC_ACT_OK;
 
     __u32 ip_hdr_len = ip->ihl * 4;
-    if (ip_hdr_len < 20 || ip_hdr_len > 60) return 0;
+    if (ip_hdr_len < 20 || ip_hdr_len > 60) return TC_ACT_OK;
 
     struct tcphdr *tcp = (void *)((unsigned char *)ip + (ip_hdr_len & 0x3F));
-    if ((void *)(tcp + 1) > data_end) return 0;
-    if (tcp->dest != bpf_htons(8888)) return 0;
+    if ((void *)(tcp + 1) > data_end) return TC_ACT_OK;
+    if (tcp->dest != bpf_htons(8888)) return TC_ACT_OK;
 
     __u32 tcp_hdr_len = tcp->doff * 4;
-    if (tcp_hdr_len < 20 || tcp_hdr_len > 60) return 0;
+    if (tcp_hdr_len < 20 || tcp_hdr_len > 60) return TC_ACT_OK;
 
     __u32 data_offset = sizeof(struct ethhdr) + ip_hdr_len + tcp_hdr_len;
     
     // 显式检查偏移量
-    // if (data_offset > 1500) return 0; 
-    if (data_offset > skb->len) return 0;
+    // if (data_offset > 1500) return TC_ACT_OK; 
+    if (data_offset > skb->len) return TC_ACT_OK;
     
     __u32 payload_len = skb->len - data_offset;
-    if (payload_len == 0) return 0;
+    if (payload_len == 0) return TC_ACT_OK;
     // 限制最大处理长度，防止验证器爆炸 (不这么做)
     // if (payload_len > 2560) payload_len = 2560;
 
@@ -98,5 +105,5 @@ int mirror_forward(struct __sk_buff *skb)
         bpf_ringbuf_submit(de, 0);
     }
 
-    return 0;
+    return TC_ACT_OK;
 }

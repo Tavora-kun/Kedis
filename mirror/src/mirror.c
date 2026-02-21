@@ -383,12 +383,6 @@ int main(int argc, char** argv) {
   cleanup_flows();
   fprintf(stderr, "\nDetaching...\n");
 
-//   if (log_fd >= 0) {
-//     get_timestamp(timestamp, sizeof(timestamp));
-//     dprintf(log_fd, "\n[Ended at %s]\n", timestamp);
-//     dprintf(log_fd, "========================================\n\n");
-//   }
-
   opts_ingress.flags = opts_ingress.prog_fd = opts_ingress.prog_id = 0;
   bpf_tc_detach(&hook, &opts_ingress);
   bpf_tc_hook_destroy(&hook);
