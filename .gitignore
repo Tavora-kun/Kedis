@@ -54,3 +54,4 @@ vmlinux.h
 *.log
 report/
 tests/image/uv.lock
+mirror/src/xdp_mirror
