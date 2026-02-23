@@ -96,7 +96,7 @@ class TestInreRepl(KVServerBase):
         slave_client = KVRedis(host=self.host, port=self.slave_port, decode_responses=False)
 
         # 4. 启动 BPF Mirror 工具
-        mirror_bin = os.path.join(self.root_dir, "mirror/src/mirror")
+        mirror_bin = os.path.join(self.root_dir, "mirror/src/xdp_mirror")
         if not os.path.exists(mirror_bin):
             self.fail(f"Mirror tool not found at {mirror_bin}. Please compile it first.")
             

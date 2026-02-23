@@ -2,7 +2,8 @@
 #define __XDP_MIRROR_COMMON_H__
 
 #define CHUNK_SIZE 1024
-#define EVENT_DATA 2  // 我们现在只需要 DATA 事件
+#define EVENT_HEADER 1
+#define EVENT_DATA 2
 
 struct packet_event {
     __u32 type;
@@ -10,8 +11,9 @@ struct packet_event {
     __u32 dst_ip;
     __u16 src_port;
     __u16 dst_port;
-    __u32 seq;         // [新增] TCP序列号，用于乱序重排
-    __u32 chunk_len;   // 当前分块的长度
+    __u32 payload_len;  // HEADER: 总长度, DATA: 当前 chunk 长度
+    __u32 offset;       // DATA 事件专用: 在 payload 中的偏移
+    __u32 chunk_len;    // DATA 事件专用: 当前 chunk 实际长度
     __u8 data[CHUNK_SIZE];
 };
 
