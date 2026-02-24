@@ -72,7 +72,7 @@ int xdp_mirror_forward(struct xdp_md *ctx)
         if (chunk_len > CHUNK_SIZE) chunk_len = CHUNK_SIZE;
 
         // 验证器友好：确保 chunk_len 在 [1, CHUNK_SIZE]
-        __u32 final_len = ((chunk_len - 1) & 0x3FF) + 1;
+        __u32 final_len = ((chunk_len - 1) & 0xFFF) + 1;
 
         struct packet_event *de = bpf_ringbuf_reserve(&rb, sizeof(*de), 0);
         if (!de) continue;
