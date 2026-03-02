@@ -146,7 +146,7 @@ static int setup_connection_resources(struct rdma_sync_context *ctx) {
     ctx->qp = ctx->cm_id->qp;
 
     /* 7. 分配控制消息缓冲区 */
-    ctx->ctrl_buf = calloc(1, sizeof(struct rdma_ctrl_msg));
+    ctx->ctrl_buf = kvs_calloc(1, sizeof(struct rdma_ctrl_msg));
     if (!ctx->ctrl_buf) {
         kvs_logError("分配控制缓冲区失败\n");
         goto err_qp;
@@ -244,7 +244,7 @@ static void cleanup_connection_resources(struct rdma_sync_context *ctx) {
  * 在 RDMA_CM_EVENT_CONNECT_REQUEST 事件时调用
  */
 static void handle_connect_request(struct rdma_cm_id *id) {
-    struct rdma_sync_context *ctx = calloc(1, sizeof(struct rdma_sync_context));
+    struct rdma_sync_context *ctx = kvs_calloc(1, sizeof(struct rdma_sync_context));
     if (!ctx) {
         kvs_logError("分配同步上下文失败\n");
         rdma_reject(id, NULL, 0);
@@ -590,7 +590,7 @@ int rdma_sync_client_init(void) {
         return 0;
     }
 
-    g_client_ctx = calloc(1, sizeof(struct rdma_client_context));
+    g_client_ctx = kvs_calloc(1, sizeof(struct rdma_client_context));
     if (!g_client_ctx) {
         kvs_logError("分配客户端上下文失败\n");
         return -1;
@@ -689,9 +689,93 @@ int rdma_sync_client_connect(const char *master_host, uint16_t master_port) {
     rdma_ack_cm_event(event);
 
     /* 创建连接资源（类似服务器端） */
-    /* ... 此处省略，与服务器端类似 ... */
+    struct ibv_qp_init_attr qp_attr = {0};
 
-    /* 发送连接请求 */
+    /* 1. 创建保护域 */
+    g_client_ctx->pd = ibv_alloc_pd(cm_id->verbs);
+    if (!g_client_ctx->pd) {
+        kvs_logError("ibv_alloc_pd 失败\n");
+        goto err_id;
+    }
+
+    /* 2. 创建完成事件通道 */
+    g_client_ctx->comp_channel = ibv_create_comp_channel(cm_id->verbs);
+    if (!g_client_ctx->comp_channel) {
+        kvs_logError("ibv_create_comp_channel 失败\n");
+        goto err_pd;
+    }
+
+    /* 3. 创建完成队列 */
+    g_client_ctx->cq = ibv_create_cq(cm_id->verbs, RDMA_CQ_CAPACITY,
+                                      NULL, g_client_ctx->comp_channel, 0);
+    if (!g_client_ctx->cq) {
+        kvs_logError("ibv_create_cq 失败\n");
+        goto err_comp_channel;
+    }
+
+    /* 4. 请求 CQ 事件通知 */
+    if (ibv_req_notify_cq(g_client_ctx->cq, 0)) {
+        kvs_logError("ibv_req_notify_cq 失败\n");
+        goto err_cq;
+    }
+
+    /* 5. 配置队列对 */
+    qp_attr.qp_type = IBV_QPT_RC;
+    qp_attr.sq_sig_all = 1;
+    qp_attr.send_cq = g_client_ctx->cq;
+    qp_attr.recv_cq = g_client_ctx->cq;
+    qp_attr.cap.max_send_wr = RDMA_MAX_WR;
+    qp_attr.cap.max_send_sge = RDMA_MAX_SGE;
+    qp_attr.cap.max_recv_wr = RDMA_MAX_WR;
+    qp_attr.cap.max_recv_sge = RDMA_MAX_SGE;
+
+    /* 6. 创建 QP */
+    if (rdma_create_qp(cm_id, g_client_ctx->pd, &qp_attr)) {
+        kvs_logError("rdma_create_qp 失败\n");
+        goto err_cq;
+    }
+    g_client_ctx->qp = cm_id->qp;
+
+    /* 7. 分配控制消息缓冲区 */
+    g_client_ctx->ctrl_send_buf = kvs_calloc(1, sizeof(struct rdma_ctrl_msg));
+    g_client_ctx->ctrl_recv_buf = kvs_calloc(1, sizeof(struct rdma_ctrl_msg));
+    if (!g_client_ctx->ctrl_send_buf || !g_client_ctx->ctrl_recv_buf) {
+        kvs_logError("分配控制缓冲区失败\n");
+        goto err_qp;
+    }
+
+    /* 8. 注册 MR */
+    g_client_ctx->mr_ctrl_send = ibv_reg_mr(g_client_ctx->pd,
+                                            g_client_ctx->ctrl_send_buf,
+                                            sizeof(struct rdma_ctrl_msg),
+                                            IBV_ACCESS_LOCAL_WRITE);
+    g_client_ctx->mr_ctrl_recv = ibv_reg_mr(g_client_ctx->pd,
+                                            g_client_ctx->ctrl_recv_buf,
+                                            sizeof(struct rdma_ctrl_msg),
+                                            IBV_ACCESS_LOCAL_WRITE);
+    if (!g_client_ctx->mr_ctrl_send || !g_client_ctx->mr_ctrl_recv) {
+        kvs_logError("ibv_reg_mr 失败\n");
+        goto err_ctrl_buf;
+    }
+
+    /* 9. 预投递接收请求 */
+    struct ibv_sge sge = {
+        .addr = (uint64_t)g_client_ctx->ctrl_recv_buf,
+        .length = sizeof(struct rdma_ctrl_msg),
+        .lkey = g_client_ctx->mr_ctrl_recv->lkey
+    };
+    struct ibv_recv_wr wr = {
+        .wr_id = 0,
+        .num_sge = 1,
+        .sg_list = &sge
+    };
+    struct ibv_recv_wr *bad_wr;
+    if (ibv_post_recv(g_client_ctx->qp, &wr, &bad_wr)) {
+        kvs_logError("ibv_post_recv 失败\n");
+        goto err_mr_ctrl;
+    }
+
+    /* 10. 发送连接请求 */
     struct rdma_conn_param conn_param = {
         .responder_resources = 1,
         .initiator_depth = 1,
@@ -700,18 +784,18 @@ int rdma_sync_client_connect(const char *master_host, uint16_t master_port) {
 
     if (rdma_connect(cm_id, &conn_param)) {
         kvs_logError("rdma_connect 失败\n");
-        goto err_id;
+        goto err_mr_ctrl;
     }
 
-    /* 等待连接建立 */
+    /* 11. 等待连接建立 */
     if (rdma_get_cm_event(cm_channel, &event)) {
-        goto err_id;
+        goto err_mr_ctrl;
     }
 
     if (event->event != RDMA_CM_EVENT_ESTABLISHED) {
         kvs_logError("连接建立失败\n");
         rdma_ack_cm_event(event);
-        goto err_id;
+        goto err_mr_ctrl;
     }
     rdma_ack_cm_event(event);
 
@@ -721,6 +805,20 @@ int rdma_sync_client_connect(const char *master_host, uint16_t master_port) {
     kvs_logInfo("RDMA 连接已建立到 %s:%d\n", master_host, master_port);
     return 0;
 
+err_mr_ctrl:
+    if (g_client_ctx->mr_ctrl_send) ibv_dereg_mr(g_client_ctx->mr_ctrl_send);
+    if (g_client_ctx->mr_ctrl_recv) ibv_dereg_mr(g_client_ctx->mr_ctrl_recv);
+err_ctrl_buf:
+    if (g_client_ctx->ctrl_send_buf) free(g_client_ctx->ctrl_send_buf);
+    if (g_client_ctx->ctrl_recv_buf) free(g_client_ctx->ctrl_recv_buf);
+err_qp:
+    rdma_destroy_qp(cm_id);
+err_cq:
+    ibv_destroy_cq(g_client_ctx->cq);
+err_comp_channel:
+    ibv_destroy_comp_channel(g_client_ctx->comp_channel);
+err_pd:
+    ibv_dealloc_pd(g_client_ctx->pd);
 err_id:
     rdma_destroy_id(cm_id);
 err_channel:
@@ -730,22 +828,118 @@ err_channel:
 
 /**
  * @brief 发送控制消息
+ *
+ * 通过 RDMA Send 操作发送控制消息到对端
  */
 int rdma_sync_send_ctrl_msg(struct rdma_client_context *ctx,
                             const struct rdma_ctrl_msg *msg) {
-    /* 类似服务器端的发送逻辑 */
-    /* ... */
+    if (!ctx || !ctx->qp) {
+        kvs_logError("无效的上下文\n");
+        return -1;
+    }
+
+    /* 复制消息到发送缓冲区 */
+    memcpy(ctx->ctrl_send_buf, msg, sizeof(struct rdma_ctrl_msg));
+
+    /* 构建 SGE */
+    struct ibv_sge sge = {
+        .addr = (uint64_t)ctx->ctrl_send_buf,
+        .length = sizeof(struct rdma_ctrl_msg),
+        .lkey = ctx->mr_ctrl_send->lkey
+    };
+
+    /* 构建 Send WR */
+    struct ibv_send_wr wr = {
+        .wr_id = 0,
+        .opcode = IBV_WR_SEND,
+        .send_flags = IBV_SEND_SIGNALED,
+        .num_sge = 1,
+        .sg_list = &sge
+    };
+
+    /* 发送 */
+    struct ibv_send_wr *bad_wr;
+    if (ibv_post_send(ctx->qp, &wr, &bad_wr)) {
+        kvs_logError("ibv_post_send 失败\n");
+        return -1;
+    }
+
+    /* 等待发送完成 */
+    struct ibv_wc wc;
+    int ret;
+    do {
+        ret = ibv_poll_cq(ctx->cq, 1, &wc);
+    } while (ret == 0);
+
+    if (ret < 0 || wc.status != IBV_WC_SUCCESS) {
+        kvs_logError("发送完成失败, status=%d\n", wc.status);
+        return -1;
+    }
+
     return 0;
 }
 
 /**
  * @brief 接收控制消息
+ *
+ * 从 CQ 中轮询接收完成，获取控制消息
  */
 int rdma_sync_recv_ctrl_msg(struct rdma_client_context *ctx,
                             struct rdma_ctrl_msg *msg,
                             int timeout_ms) {
-    /* 从 CQ 中轮询接收完成 */
-    /* ... */
+    if (!ctx || !ctx->cq) {
+        kvs_logError("无效的上下文\n");
+        return -1;
+    }
+
+    struct ibv_wc wc;
+    int ret;
+    int waited = 0;
+
+    /* 轮询等待接收完成 */
+    do {
+        ret = ibv_poll_cq(ctx->cq, 1, &wc);
+        if (ret == 0) {
+            /* 短暂休眠避免忙等 */
+            usleep(1000);  /* 1ms */
+            waited += 1;
+            if (timeout_ms > 0 && waited >= timeout_ms) {
+                kvs_logError("接收超时\n");
+                return -1;
+            }
+        }
+    } while (ret == 0);
+
+    if (ret < 0) {
+        kvs_logError("ibv_poll_cq 失败\n");
+        return -1;
+    }
+
+    if (wc.status != IBV_WC_SUCCESS) {
+        kvs_logError("接收失败, status=%d\n", wc.status);
+        return -1;
+    }
+
+    /* 复制接收到的消息 */
+    memcpy(msg, ctx->ctrl_recv_buf, sizeof(struct rdma_ctrl_msg));
+
+    /* 重新投递接收请求 */
+    struct ibv_sge sge = {
+        .addr = (uint64_t)ctx->ctrl_recv_buf,
+        .length = sizeof(struct rdma_ctrl_msg),
+        .lkey = ctx->mr_ctrl_recv->lkey
+    };
+    struct ibv_recv_wr wr = {
+        .wr_id = 0,
+        .num_sge = 1,
+        .sg_list = &sge
+    };
+    struct ibv_recv_wr *bad_wr;
+    if (ibv_post_recv(ctx->qp, &wr, &bad_wr)) {
+        kvs_logError("ibv_post_recv 失败\n");
+        return -1;
+    }
+
     return 0;
 }
 
@@ -1036,16 +1230,65 @@ int rdma_sync_perform_full_sync(void) {
  * @brief 断开 RDMA 连接
  */
 void rdma_sync_client_disconnect(void) {
-    if (!g_client_ctx || !g_client_ctx->cm_id) {
+    if (!g_client_ctx) {
         return;
     }
 
-    rdma_disconnect(g_client_ctx->cm_id);
+    if (g_client_ctx->cm_id) {
+        rdma_disconnect(g_client_ctx->cm_id);
+    }
 
     /* 清理资源 */
-    /* ... */
+    if (g_client_ctx->mr_ctrl_send) {
+        ibv_dereg_mr(g_client_ctx->mr_ctrl_send);
+        g_client_ctx->mr_ctrl_send = NULL;
+    }
+    if (g_client_ctx->mr_ctrl_recv) {
+        ibv_dereg_mr(g_client_ctx->mr_ctrl_recv);
+        g_client_ctx->mr_ctrl_recv = NULL;
+    }
+    if (g_client_ctx->mr_recv) {
+        ibv_dereg_mr(g_client_ctx->mr_recv);
+        g_client_ctx->mr_recv = NULL;
+    }
+    if (g_client_ctx->ctrl_send_buf) {
+        free(g_client_ctx->ctrl_send_buf);
+        g_client_ctx->ctrl_send_buf = NULL;
+    }
+    if (g_client_ctx->ctrl_recv_buf) {
+        free(g_client_ctx->ctrl_recv_buf);
+        g_client_ctx->ctrl_recv_buf = NULL;
+    }
+    if (g_client_ctx->recv_buf) {
+        free(g_client_ctx->recv_buf);
+        g_client_ctx->recv_buf = NULL;
+    }
+    if (g_client_ctx->qp) {
+        rdma_destroy_qp(g_client_ctx->cm_id);
+        g_client_ctx->qp = NULL;
+    }
+    if (g_client_ctx->cq) {
+        ibv_destroy_cq(g_client_ctx->cq);
+        g_client_ctx->cq = NULL;
+    }
+    if (g_client_ctx->comp_channel) {
+        ibv_destroy_comp_channel(g_client_ctx->comp_channel);
+        g_client_ctx->comp_channel = NULL;
+    }
+    if (g_client_ctx->pd) {
+        ibv_dealloc_pd(g_client_ctx->pd);
+        g_client_ctx->pd = NULL;
+    }
+    if (g_client_ctx->cm_id) {
+        rdma_destroy_id(g_client_ctx->cm_id);
+        g_client_ctx->cm_id = NULL;
+    }
 
-    g_client_ctx->state = SYNC_STATE_IDLE;
+    pthread_mutex_destroy(&g_client_ctx->cmd_queue_lock);
+
+    free(g_client_ctx);
+    g_client_ctx = NULL;
+
     kvs_logInfo("RDMA 连接已断开\n");
 }
 
@@ -1060,52 +1303,128 @@ int rdma_sync_in_progress(void) {
 }
 
 /**
- * @brief 从缓冲区加载引擎数据（需要实现）
+ * @brief 从内存缓冲区解码VLQ编码的整数
+ * 与ksf.c中的decode_vlq保持一致
+ */
+static int decode_vlq_rdma(const uint8_t* input, uint64_t* value) {
+    int count = 0;
+    *value = 0;
+    int shift = 0;
+
+    do {
+        *value |= ((uint64_t)(input[count] & 0x7F)) << shift;
+        shift += 7;
+    } while (input[count++] & 0x80);
+
+    return count;
+}
+
+/**
+ * @brief 从内存缓冲区加载引擎数据
  *
- * 此函数需要在 ksf.c 中实现，或者在这里调用现有的 ksf 加载函数
+ * 解析KSF格式的缓冲区数据，加载到指定引擎
+ * 实现参考自ksf.c中的ksfLoadToEngine
  */
 int ksf_load_engine_from_buffer(int engine_type,
                                  void *buffer,
                                  size_t length) {
-    /* TODO: 实现从内存缓冲区加载 KSF 数据 */
-    /* 可以创建一个内存文件描述符，然后复用 ksfLoad 函数 */
-
-    /* 临时方案：写入临时文件再加载 */
-    char tmpfile[] = "/tmp/kvs_sync_XXXXXX";
-    int fd = mkstemp(tmpfile);
-    if (fd < 0) {
-        return -1;
+    if (!buffer || length == 0) {
+        kvs_logInfo("缓冲区为空，无需加载\n");
+        return 0;
     }
 
-    if (write(fd, buffer, length) != (ssize_t)length) {
-        close(fd);
-        unlink(tmpfile);
-        return -1;
+    kvs_logInfo("开始从缓冲区加载引擎 %s，大小 %zu bytes\n",
+                rdma_sync_engine_name(engine_type), length);
+
+    char *buf = (char *)buffer;
+    size_t pos = 0;
+    int count = 0;
+
+    /* 解析KSF内容并恢复数据 */
+    while (pos < length) {
+        /* 解码键长度（VLQ格式） */
+        if (pos >= length) break;
+        uint64_t key_len;
+        int key_len_bytes = decode_vlq_rdma((const uint8_t *)(buf + pos), &key_len);
+        pos += key_len_bytes;
+
+        /* 解码值长度（VLQ格式） */
+        if (pos >= length) break;
+        uint64_t val_len;
+        int val_len_bytes = decode_vlq_rdma((const uint8_t *)(buf + pos), &val_len);
+        pos += val_len_bytes;
+
+        /* 读取键内容 */
+        if (pos + key_len > length) break;
+        robj key = {0};
+        key.len = (key_len > 0) ? (key_len - 1) : 0;
+        if (key_len > 0) {
+            key.ptr = (char *)kvs_malloc(key_len);
+            if (!key.ptr) {
+                kvs_logError("无法分配内存来存储键\n");
+                return -1;
+            }
+            memcpy(key.ptr, buf + pos, key_len);
+            key.ptr[key_len - 1] = '\0';
+            pos += key_len;
+        }
+
+        /* 读取值内容 */
+        robj value = {0};
+        value.len = (val_len > 0) ? (val_len - 1) : 0;
+        if (val_len > 0) {
+            if (pos + val_len > length) {
+                if (key.ptr) kvs_free(key.ptr);
+                return -1;
+            }
+            value.ptr = (char *)kvs_malloc(val_len);
+            if (!value.ptr) {
+                kvs_logError("无法分配内存来存储值\n");
+                if (key.ptr) kvs_free(key.ptr);
+                return -1;
+            }
+            memcpy(value.ptr, buf + pos, val_len);
+            value.ptr[val_len - 1] = '\0';
+            pos += val_len;
+        }
+
+        /* 根据引擎类型执行SET操作 */
+#if ENABLE_MULTI_ENGINE
+        switch (engine_type) {
+        case ENGINE_ARRAY:
+#if ENABLE_ARRAY
+            kvs_array_set(&array_engine, &key, &value);
+#endif
+            break;
+        case ENGINE_RBTREE:
+#if ENABLE_RBTREE
+            kvs_rbtree_set(&rbtree_engine, &key, &value);
+#endif
+            break;
+        case ENGINE_HASH:
+#if ENABLE_HASH
+            kvs_hash_set(&hash_engine, &key, &value);
+#endif
+            break;
+        case ENGINE_SKIPLIST:
+#if ENABLE_SKIPLIST
+            kvs_skiplist_set(&skiplist_engine, &key, &value);
+#endif
+            break;
+        default:
+            break;
+        }
+#else
+        kvs_main_set(&global_main_engine, &key, &value);
+#endif
+
+        /* 释放分配的内存 */
+        if (key.ptr) kvs_free(key.ptr);
+        if (value.ptr) kvs_free(value.ptr);
+        count++;
     }
 
-    lseek(fd, 0, SEEK_SET);
-
-    /* 根据引擎类型调用对应的加载函数 */
-    int ret = -1;
-    switch (engine_type) {
-    case ENGINE_ARRAY:
-        /* ret = ksfLoadArray(fd, &array_engine); */
-        break;
-    case ENGINE_RBTREE:
-        /* ret = ksfLoadRbtree(fd, &rbtree_engine); */
-        break;
-    case ENGINE_HASH:
-        /* ret = ksfLoadHash(fd, &hash_engine); */
-        break;
-    case ENGINE_SKIPLIST:
-        /* ret = ksfLoadSkiplist(fd, &skiplist_engine); */
-        break;
-    default:
-        break;
-    }
-
-    close(fd);
-    unlink(tmpfile);
-
-    return ret;
+    kvs_logInfo("引擎 %s 加载完成，共 %d 条记录\n",
+                rdma_sync_engine_name(engine_type), count);
+    return 0;
 }
