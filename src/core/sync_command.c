@@ -15,9 +15,15 @@ extern struct rdma_client_context *g_client_ctx;
 extern kv_config g_config;
 
 /*
- * 从节点存量同步工作线程
- * 在后台执行 RDMA 存量同步
+ * 【方案C废弃】从节点存量同步工作线程
+ *
+ * 原功能: 在后台执行 RDMA 存量同步
+ * 废弃原因: 方案C使用同步阻塞的 rdma_sync_client_start_via_tcp()，
+ *          无需后台线程。同步流程直接在调用线程中执行。
+ *
+ * 保留目的: 代码参考，如需异步执行可重新启用
  */
+#if 0
 static void* slave_sync_worker(void *arg) {
     kvs_logInfo("[SYNC] 从节点同步线程启动\n");
 
@@ -34,10 +40,15 @@ static void* slave_sync_worker(void *arg) {
 
     return NULL;
 }
+#endif
 
 /*
  * 启动从节点的存量同步流程
  * 在配置加载后或收到 REPLICAOF 命令时调用
+ *
+ * 【方案C修改】使用TCP-first连接方式
+ * 原流程: 直接连接RDMA端口 -> 同步
+ * 新流程: TCP连接 -> 发送RDMASYNC -> fork触发 -> RDMA连接 -> 同步
  */
 int start_slave_sync(void) {
     if (g_config.master_host[0] == '\0') {
@@ -45,32 +56,50 @@ int start_slave_sync(void) {
         return -1;
     }
 
-    /* 初始化 RDMA 客户端 */
+    /* 【方案C】初始化 RDMA 客户端 */
     if (rdma_sync_client_init() < 0) {
         kvs_logError("[SYNC] RDMA 客户端初始化失败\n");
         return -1;
     }
 
-    /* 建立 RDMA 连接 */
-    uint16_t rdma_port = g_config.master_port + RDMA_PORT_OFFSET;
-    if (rdma_sync_client_connect(g_config.master_host, rdma_port) < 0) {
-        kvs_logError("[SYNC] RDMA 连接失败\n");
+    /*
+     * 【方案C变更】使用TCP-first连接方式
+     *
+     * 原代码:
+     *   uint16_t rdma_port = g_config.master_port + RDMA_PORT_OFFSET;
+     *   if (rdma_sync_client_connect(g_config.master_host, rdma_port) < 0)
+     *
+     * 新代码:
+     *   调用rdma_sync_client_start_via_tcp()封装完整流程:
+     *   1. TCP连接到主节点
+     *   2. 发送RDMASYNC命令触发fork
+     *   3. 接收+RDMA_READY获取动态RDMA端口
+     *   4. 建立RDMA连接
+     *   5. 执行存量同步
+     *   6. 接收+RDMA_DONE，关闭TCP连接
+     *
+     * 注意: 此函数是阻塞的，需要在后台线程中调用
+     */
+    if (rdma_sync_client_start_via_tcp(g_config.master_host,
+                                        g_config.master_port,
+                                        ENGINE_COUNT) < 0) {
+        kvs_logError("[SYNC] TCP触发的RDMA同步失败\n");
         return -1;
     }
 
-    /* 启动后台同步线程 */
-    pthread_t sync_thread;
-    if (pthread_create(&sync_thread, NULL, slave_sync_worker, NULL) != 0) {
-        kvs_logError("[SYNC] 创建同步线程失败\n");
-        rdma_sync_client_disconnect();
-        return -1;
-    }
+    kvs_logInfo("[SYNC] 存量同步成功完成，主节点: %s:%d\n",
+                g_config.master_host, g_config.master_port);
 
-    /* 分离线程，让其独立运行 */
-    pthread_detach(sync_thread);
-
-    kvs_logInfo("[SYNC] 存量同步已启动，主节点: %s:%d (RDMA: %d)\n",
-                g_config.master_host, g_config.master_port, rdma_port);
+    /*
+     * 【方案C说明】同步流程已完成
+     *
+     * 注意: 原方案使用后台线程是因为RDMA连接是异步的。
+     * 方案C中rdma_sync_client_start_via_tcp()是同步阻塞的，
+     * 如果需要在后台执行，调用方应自行创建线程。
+     *
+     * 当前简化: 直接返回成功，同步已完成。
+     * 如需后台执行，可将此调用包装在pthread中。
+     */
 
     return 0;
 }
@@ -178,30 +207,71 @@ int kvs_cmd_replicaof(struct conn *c, int argc, robj *argv) {  // robj 定义在
 
 /*
  * 初始化同步模块
- * 在主节点启动 RDMA 服务器，从节点准备客户端
+ *
+ * 【方案C修改】主节点不再启动常驻RDMA服务器
+ * 原行为: 主节点启动常驻RDMA监听线程
+ * 新行为: 主节点仅做基础准备，RDMA服务器由TCP触发fork时创建
  */
 int sync_module_init(void) {
-    /* 主节点：启动 RDMA 服务器 */
+    /*
+     * 【方案C】主节点初始化
+     *
+     * 原代码:
+     *   if (g_config.replica_mode == REPLICA_MODE_MASTER) {
+     *       uint16_t rdma_port = g_config.port + RDMA_PORT_OFFSET;
+     *       if (rdma_sync_server_init(rdma_port) < 0) ...
+     *   }
+     *
+     * 新行为:
+     *   rdma_sync_server_init()现在是一个空函数（直接返回0），
+     *   但为了代码清晰，主节点在方案C下无需调用任何初始化。
+     *
+     *   真正的RDMA服务器由rdma_sync_child_server()在fork出的子进程中创建。
+     */
     if (g_config.replica_mode == REPLICA_MODE_MASTER) {
-        uint16_t rdma_port = g_config.port + RDMA_PORT_OFFSET;
-        if (rdma_sync_server_init(rdma_port) < 0) {
-            kvs_logError("[SYNC] RDMA 服务器启动失败\n");
-            return -1;
-        }
-        kvs_logInfo("[SYNC] 主节点 RDMA 服务器监听端口 %d\n", rdma_port);
+        /*
+         * 方案C: 主节点无需常驻RDMA服务器
+         * 同步请求通过TCP命令触发，动态fork子进程处理
+         */
+        kvs_logInfo("[SYNC] 主节点同步模块初始化（方案C: TCP触发fork）\n");
+
+        /* 可以在这里创建临时目录等准备工作 */
+        /* mkdir(RDMA_SYNC_TEMP_DIR, 0755); */
     }
-    /* 从节点：延迟到启动后或 REPLICAOF 命令时再连接 */
+
+    /* 从节点：延迟到REPLICAOF/SYNC命令时再初始化连接 */
 
     return 0;
 }
 
 /*
  * 清理同步模块
+ *
+ * 【方案C修改】主节点无需显式清理RDMA服务器
+ * 原行为: 主节点调用rdma_sync_server_stop()停止常驻服务器
+ * 新行为: 子进程自动清理，主节点只需处理客户端断开
  */
 void sync_module_cleanup(void) {
     if (g_config.replica_mode == REPLICA_MODE_MASTER) {
-        rdma_sync_server_stop();
+        /*
+         * 【方案C】主节点无需显式停止RDMA服务器
+         *
+         * 原因:
+         *   方案C中RDMA服务器运行在fork出的子进程中，
+         *   子进程完成同步后自动exit()，资源由操作系统回收。
+         *
+         *   主进程无需（也无法）管理子进程的RDMA资源。
+         *
+         * 可选增强:
+         *   如果需要优雅等待子进程，可以在这里发送信号或
+         *   使用waitpid()收割已结束的子进程。
+         */
+        kvs_logInfo("[SYNC] 主节点清理（子进程自动退出，无需显式停止）\n");
+
+        /* 可选: 收割所有已结束的子进程，避免僵尸进程 */
+        /* while (waitpid(-1, NULL, WNOHANG) > 0); */
     } else {
+        /* 从节点: 断开RDMA连接 */
         rdma_sync_client_disconnect();
     }
 }

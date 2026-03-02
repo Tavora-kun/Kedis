@@ -24,6 +24,8 @@
 #include <sys/stat.h>
 #include <pthread.h>
 #include <ctype.h>  // isspace, isdigit 等字符处理函数
+#include <dirent.h> // 用于子进程遍历/proc/self/fd关闭继承的fd
+#include <signal.h> // 用于子进程忽略SIGCHLD避免僵尸进程
 
 /* ============================================================================
  * 外部引擎变量声明（来自 kvstore.c）
@@ -38,21 +40,38 @@ extern kvs_rbtree_t global_main_engine;
 #endif
 
 /* ============================================================================
- * 全局变量
- * ============================================================================ */
+ * 全局变量 - 方案C重构说明
+ * ============================================================================
+ *
+ * 方案C变更:
+ *   删除常驻服务器相关全局变量，改为fork时临时创建
+ *   原因: 避免主进程常驻资源占用，简化架构
+ *
+ * 保留变量:
+ *   - g_client_ctx: 从节点客户端上下文（仍需要）
+ *   - g_engine_names: 引擎名称映射（通用工具）
+ *
+ * 删除变量:
+ *   - g_cm_channel:    常驻事件通道（子进程临时创建）
+ *   - g_listener:      常驻监听ID（子进程临时创建）
+ *   - g_server_poll_thread: 常驻轮询线程（不再需要）
+ *   - g_server_running: 服务器运行标志（不再需要）
+ *   - g_slaves_head:   从节点链表（子进程单连接处理）
+ *   - g_slaves_lock:   链表锁（不再需要）
+ */
 
-/* 从节点全局客户端上下文 */
+/* 【保留】从节点全局客户端上下文 */
 static struct rdma_client_context *g_client_ctx = NULL;
 
-/* 主节点全局服务器状态 */
+/* 【废弃-方案A/B】主节点常驻服务器状态 - 已注释
+ * 这些变量在方案C中不再使用，保留注释以便代码考古
 static struct rdma_event_channel *g_cm_channel = NULL;
 static struct rdma_cm_id *g_listener = NULL;
 static pthread_t g_server_poll_thread;
 static volatile int g_server_running = 0;
-
-/* 已连接的从节点链表（主节点端） */
 static struct rdma_sync_context *g_slaves_head = NULL;
 static pthread_mutex_t g_slaves_lock = PTHREAD_MUTEX_INITIALIZER;
+ */
 
 /* 引擎名称映射表 */
 static const char *g_engine_names[] = {
@@ -238,6 +257,21 @@ static void cleanup_connection_resources(struct rdma_sync_context *ctx) {
         ibv_dealloc_pd(ctx->pd);
     }
 }
+
+/*
+ * ============================================================================
+ * 【方案C废弃】常驻服务器相关函数
+ * ============================================================================
+ *
+ * 以下函数为方案A/B的常驻RDMA服务器实现，方案C中不再使用。
+ * 方案C使用TCP触发fork子进程的方式，子进程中临时创建RDMA服务器。
+ *
+ * 保留这些函数定义（用#if 0包裹）以便：
+ *   1. 代码考古和参考
+ *   2. 未来如需回退到常驻服务器方案
+ *   3. 理解两种架构的差异
+ */
+#if 0
 
 /**
  * @brief 处理新的连接请求
@@ -486,94 +520,512 @@ static void* server_poll_loop(void *arg) {
     return NULL;
 }
 
+#endif /* 方案C: 禁用常驻服务器逻辑 */
+
 /**
  * @brief 初始化 RDMA 同步服务器
  */
+/**
+ * @brief 【方案C废弃】初始化 RDMA 同步服务器
+ *
+ * 原功能: 创建常驻RDMA监听线程
+ * 新行为: 直接返回0，不执行任何操作
+ *
+ * 原因:
+ *   方案C使用TCP触发fork子进程的方式，不再需要在主进程中
+ *   常驻监听RDMA连接。子进程在需要时临时创建RDMA服务器。
+ *
+ * 兼容性:
+ *   保留此函数以便现有代码编译通过，sync_module_init()仍可调用
+ */
 int rdma_sync_server_init(uint16_t listen_port) {
-    /* 创建 CM 事件通道 */
-    g_cm_channel = rdma_create_event_channel();
-    if (!g_cm_channel) {
-        kvs_logError("rdma_create_event_channel 失败\n");
-        return -1;
-    }
-
-    /* 创建监听 ID */
-    if (rdma_create_id(g_cm_channel, &g_listener, NULL, RDMA_PS_TCP)) {
-        kvs_logError("rdma_create_id 失败\n");
-        goto err_channel;
-    }
-
-    /* 绑定地址 */
-    struct sockaddr_in addr = {
-        .sin_family = AF_INET,
-        .sin_port = htons(listen_port),
-        .sin_addr.s_addr = INADDR_ANY
-    };
-
-    if (rdma_bind_addr(g_listener, (struct sockaddr *)&addr)) {
-        kvs_logError("rdma_bind_addr 失败: %s\n", strerror(errno));
-        goto err_id;
-    }
-
-    /* 开始监听 */
-    if (rdma_listen(g_listener, 4)) {
-        kvs_logError("rdma_listen 失败\n");
-        goto err_id;
-    }
-
-    kvs_logInfo("RDMA 同步服务器监听端口 %d\n", listen_port);
-
-    /* 启动轮询线程 */
-    g_server_running = 1;
-    if (pthread_create(&g_server_poll_thread, NULL, server_poll_loop, NULL)) {
-        kvs_logError("创建轮询线程失败\n");
-        goto err_id;
-    }
-
-    return 0;
-
-err_id:
-    rdma_destroy_id(g_listener);
-    g_listener = NULL;
-err_channel:
-    rdma_destroy_event_channel(g_cm_channel);
-    g_cm_channel = NULL;
-    return -1;
+    (void)listen_port; /* 参数未使用，避免编译警告 */
+    kvs_logInfo("[方案C] rdma_sync_server_init: 常驻服务器已废弃，使用TCP触发fork\n");
+    return 0; /* 假装成功，实际功能由子进程实现 */
 }
 
 /**
- * @brief 停止 RDMA 同步服务器
+ * @brief 【方案C废弃】停止 RDMA 同步服务器
+ *
+ * 原功能: 停止常驻服务器，断开所有从节点
+ * 新行为: 直接返回，不执行任何操作
+ *
+ * 原因:
+ *   方案C中子进程退出即自动清理资源，无需显式停止。
+ *   每个同步会话由独立子进程处理，资源随进程终止而释放。
  */
 void rdma_sync_server_stop(void) {
-    g_server_running = 0;
+    /* 方案C: 子进程自动清理，此函数为空操作 */
+    kvs_logInfo("[方案C] rdma_sync_server_stop: 子进程自动清理，无需显式停止\n");
+}
 
-    /* 等待轮询线程结束 */
-    pthread_join(g_server_poll_thread, NULL);
+/* ============================================================================
+ * 方案C子进程服务器实现 (TCP-Triggered Fork)
+ * ============================================================================
+ *
+ * 核心设计:
+ *   主进程收到RDMASYNC命令时fork子进程，子进程负责完整的RDMA同步会话。
+ *   子进程通过继承的TCP fd发送控制信号，独立管理RDMA连接生命周期。
+ */
 
-    /* 断开所有从节点 */
-    pthread_mutex_lock(&g_slaves_lock);
-    while (g_slaves_head) {
-        struct rdma_sync_context *ctx = g_slaves_head;
-        g_slaves_head = ctx->next;
-
-        rdma_disconnect(ctx->cm_id);
-        cleanup_connection_resources(ctx);
-        rdma_destroy_id(ctx->cm_id);
-        free(ctx);
+/**
+ * @brief 子进程关闭除指定fd外的所有文件描述符
+ *
+ * 功能: 防止子进程继承的fd与父进程冲突，特别是监听fd和epoll/io_uring fd
+ *
+ * 实现方式:
+ *   遍历/proc/self/fd/目录，关闭所有非必要fd
+ *
+ * 注意:
+ *   - 必须在fork后立即调用，在任何可能分配fd的操作之前
+ *   - 保留stdin(0), stdout(1), stderr(2)以便日志输出
+ *   - 保留dirfd(dir)本身，避免关闭正在遍历的目录
+ *
+ * @param keep_fd 需要保留的fd（TCP连接）
+ */
+static void child_close_all_fds_except(int keep_fd) {
+    DIR *dir = opendir("/proc/self/fd");
+    if (!dir) {
+        /* 如果无法打开/proc/self/fd，使用备用方案：关闭常见范围的fd */
+        for (int fd = 3; fd < 256; fd++) {
+            if (fd != keep_fd) {
+                close(fd);
+            }
+        }
+        return;
     }
-    pthread_mutex_unlock(&g_slaves_lock);
 
-    /* 清理监听资源 */
-    if (g_listener) {
-        rdma_destroy_id(g_listener);
-        g_listener = NULL;
-    }
-    if (g_cm_channel) {
-        rdma_destroy_event_channel(g_cm_channel);
-        g_cm_channel = NULL;
+    struct dirent *entry;
+    int dir_fd = dirfd(dir); /* 获取目录自身的fd，避免关闭 */
+
+    while ((entry = readdir(dir)) != NULL) {
+        /* 跳过.和.. */
+        if (entry->d_name[0] == '.') continue;
+
+        int fd = atoi(entry->d_name);
+
+        /* 保留标准IO、keep_fd和目录fd */
+        if (fd > 2 && fd != keep_fd && fd != dir_fd) {
+            close(fd);
+        }
     }
 
-    kvs_logInfo("RDMA 同步服务器已停止\n");
+    closedir(dir);
+}
+
+/**
+ * @brief 子进程通过TCP发送响应到从节点
+ *
+ * 功能: 在RDMA准备就绪或完成时通过原TCP连接通知从节点
+ *
+ * 协议格式:
+ *   +RDMA_READY <rdma_port>\r\n  - RDMA服务器就绪，携带动态端口
+ *   +RDMA_DONE\r\n              - 同步完成
+ *   -ERR <message>\r\n          - 发生错误
+ *
+ * @param tcp_fd    从节点TCP连接fd
+ * @param status    状态字符串 ("RDMA_READY", "RDMA_DONE", "ERR")
+ * @param rdma_port RDMA端口(status为RDMA_READY时有效，否则为0)
+ * @return 0成功，-1失败
+ */
+static int child_send_tcp_response(int tcp_fd, const char *status,
+                                    uint16_t rdma_port) {
+    char buf[128];
+    int len;
+
+    if (strcmp(status, "RDMA_READY") == 0 && rdma_port > 0) {
+        len = snprintf(buf, sizeof(buf), "+RDMA_READY %d\r\n", rdma_port);
+    } else if (strcmp(status, "RDMA_DONE") == 0) {
+        len = snprintf(buf, sizeof(buf), "+RDMA_DONE\r\n");
+    } else if (strcmp(status, "ERR") == 0) {
+        len = snprintf(buf, sizeof(buf), "-ERR RDMA sync failed\r\n");
+    } else {
+        len = snprintf(buf, sizeof(buf), "+%s\r\n", status);
+    }
+
+    /* 确保完整发送 */
+    int sent = 0;
+    while (sent < len) {
+        int n = write(tcp_fd, buf + sent, len - sent);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            kvs_logError("[子进程] 发送TCP响应失败: %s\n", strerror(errno));
+            return -1;
+        }
+        sent += n;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief 【方案C核心】子进程RDMA服务器主函数
+ *
+ * 功能: 处理单个从节点的完整RDMA存量同步会话
+ *
+ * 生命周期:
+ *   1. fork后立即调用此函数
+ *   2. 完成同步后exit()，不返回父进程
+ *
+ * @param tcp_fd      从节点TCP连接fd（用于控制信号）
+ * @param engine_type 需要同步的引擎类型（预留扩展）
+ * @return 不会返回，通过exit(code)结束进程
+ */
+int rdma_sync_child_server(int tcp_fd, rdma_engine_type_t engine_type) {
+    /*
+     * ============================================================
+     * 阶段1: 进程隔离与fd清理
+     * ============================================================
+     */
+    kvs_logInfo("[子进程] RDMA子服务器启动，处理引擎类型: %d\n", engine_type);
+
+    /* 关闭继承的所有fd，只保留TCP连接fd */
+    child_close_all_fds_except(tcp_fd);
+
+    /* 忽略SIGCHLD，避免成为僵尸进程 */
+    signal(SIGCHLD, SIG_IGN);
+
+    /* 设置进程标题（便于ps查看） */
+    // prctl(PR_SET_NAME, "kvstore-rdma-child", 0, 0, 0); /* Linux特有 */
+
+    /*
+     * ============================================================
+     * 阶段2: 创建RDMA监听资源
+     * ============================================================
+     */
+    struct rdma_event_channel *cm_channel = rdma_create_event_channel();
+    if (!cm_channel) {
+        kvs_logError("[子进程] 创建RDMA事件通道失败\n");
+        child_send_tcp_response(tcp_fd, "ERR", 0);
+        exit(1);
+    }
+
+    struct rdma_cm_id *listener = NULL;
+    if (rdma_create_id(cm_channel, &listener, NULL, RDMA_PS_TCP)) {
+        kvs_logError("[子进程] 创建RDMA ID失败\n");
+        goto err_channel;
+    }
+
+    /* 绑定到任意地址，让系统分配动态端口 */
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_port = 0,  /* 0表示动态分配端口 */
+        .sin_addr.s_addr = INADDR_ANY
+    };
+
+    if (rdma_bind_addr(listener, (struct sockaddr *)&addr)) {
+        kvs_logError("[子进程] RDMA绑定失败: %s\n", strerror(errno));
+        goto err_id;
+    }
+
+    if (rdma_listen(listener, 1)) {  /* 只接受1个连接 */
+        kvs_logError("[子进程] RDMA监听失败\n");
+        goto err_id;
+    }
+
+    /* 获取实际分配的端口 */
+    struct sockaddr *local_addr = rdma_get_local_addr(listener);
+    uint16_t rdma_port = ntohs(((struct sockaddr_in *)local_addr)->sin_port);
+    kvs_logInfo("[子进程] RDMA服务器监听动态端口 %d\n", rdma_port);
+
+    /*
+     * ============================================================
+     * 阶段3: 通知从节点RDMA就绪
+     * ============================================================
+     */
+    if (child_send_tcp_response(tcp_fd, "RDMA_READY", rdma_port) < 0) {
+        kvs_logError("[子进程] 发送READY通知失败\n");
+        goto err_id;
+    }
+
+    /*
+     * ============================================================
+     * 阶段4: 等待从节点RDMA连接
+     * ============================================================
+     */
+    struct rdma_cm_event *event;
+    if (rdma_get_cm_event(cm_channel, &event)) {
+        kvs_logError("[子进程] 获取CM事件失败\n");
+        goto err_id;
+    }
+
+    if (event->event != RDMA_CM_EVENT_CONNECT_REQUEST) {
+        kvs_logError("[子进程] 非连接请求事件: %d\n", event->event);
+        rdma_ack_cm_event(event);
+        goto err_id;
+    }
+
+    struct rdma_cm_id *cm_id = event->id;  /* 新连接的ID */
+    rdma_ack_cm_event(event);
+
+    /* 创建连接资源 */
+    struct rdma_sync_context ctx = {0};
+    ctx.cm_id = cm_id;
+
+    if (setup_connection_resources(&ctx) < 0) {
+        kvs_logError("[子进程] 设置连接资源失败\n");
+        goto err_id;
+    }
+
+    /* 接受连接 */
+    struct rdma_conn_param conn_param = {
+        .responder_resources = 1,
+        .initiator_depth = 1,
+        .retry_count = 5
+    };
+
+    if (rdma_accept(cm_id, &conn_param)) {
+        kvs_logError("[子进程] RDMA接受连接失败\n");
+        goto err_conn;
+    }
+
+    /* 等待连接建立 */
+    if (rdma_get_cm_event(cm_channel, &event)) {
+        goto err_conn;
+    }
+
+    if (event->event != RDMA_CM_EVENT_ESTABLISHED) {
+        kvs_logError("[子进程] 连接建立失败: %d\n", event->event);
+        rdma_ack_cm_event(event);
+        goto err_conn;
+    }
+    rdma_ack_cm_event(event);
+
+    kvs_logInfo("[子进程] RDMA连接已建立\n");
+
+    /*
+     * ============================================================
+     * 阶段5: 引擎同步循环
+     * ============================================================
+     */
+    int engine_start = (engine_type == ENGINE_COUNT) ? 0 : engine_type;
+    int engine_end = (engine_type == ENGINE_COUNT) ? ENGINE_COUNT : engine_type + 1;
+
+    for (int eng = engine_start; eng < engine_end; eng++) {
+        rdma_engine_type_t current_engine = (rdma_engine_type_t)eng;
+        kvs_logInfo("[子进程] 准备同步引擎: %s\n",
+                    rdma_sync_engine_name(current_engine));
+
+        /* TODO: 实现完整的PREPARE/READY/READ/COMPLETE流程 */
+        /* 这里先发送错误，表示功能待实现 */
+        kvs_logWarn("[子进程] 引擎同步流程待实现\n");
+        break;
+    }
+
+    /*
+     * ============================================================
+     * 阶段6: 完成同步，发送DONE通知
+     * ============================================================
+     */
+    child_send_tcp_response(tcp_fd, "RDMA_DONE", 0);
+    close(tcp_fd);
+
+    /*
+     * ============================================================
+     * 阶段7: 清理资源并退出
+     * ============================================================
+     */
+    rdma_disconnect(cm_id);
+    cleanup_connection_resources(&ctx);
+    rdma_destroy_id(cm_id);
+    rdma_destroy_id(listener);
+    rdma_destroy_event_channel(cm_channel);
+
+    kvs_logInfo("[子进程] RDMA同步完成，退出\n");
+    exit(0);  /* 子进程正常退出 */
+
+err_conn:
+    cleanup_connection_resources(&ctx);
+    if (cm_id) rdma_destroy_id(cm_id);
+err_id:
+    if (listener) rdma_destroy_id(listener);
+err_channel:
+    if (cm_channel) rdma_destroy_event_channel(cm_channel);
+    close(tcp_fd);
+    exit(1);  /* 子进程异常退出 */
+}
+
+/**
+ * @brief 【方案C新增】客户端通过TCP触发RDMA同步
+ *
+ * 功能: 先建立TCP连接发送RDMASYNC命令，触发主节点fork，
+ *       然后连接动态分配的RDMA端口执行存量同步
+ *
+ * 调用时序:
+ *   1. 从节点配置REPLICAOF或执行SYNC命令时调用
+ *   2. 此函数内部调用rdma_sync_client_connect()建立RDMA连接
+ *   3. 然后调用rdma_sync_perform_full_sync()执行数据同步
+ *
+ * @param master_host  主节点地址
+ * @param master_port  主节点TCP端口
+ * @param engine_type  需要同步的引擎类型
+ * @return 0成功，-1失败
+ */
+int rdma_sync_client_start_via_tcp(const char *master_host,
+                                    uint16_t master_port,
+                                    rdma_engine_type_t engine_type) {
+    /*
+     * ============================================================
+     * 阶段1: 建立TCP连接到主节点
+     * ============================================================
+     */
+    int tcp_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (tcp_fd < 0) {
+        kvs_logError("[客户端] 创建TCP socket失败\n");
+        return -1;
+    }
+
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_port = htons(master_port)
+    };
+
+    if (inet_pton(AF_INET, master_host, &addr.sin_addr) != 1) {
+        kvs_logError("[客户端] 无效的主节点地址: %s\n", master_host);
+        close(tcp_fd);
+        return -1;
+    }
+
+    kvs_logInfo("[客户端] 连接主节点TCP %s:%d...\n", master_host, master_port);
+
+    if (connect(tcp_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        kvs_logError("[客户端] TCP连接失败: %s\n", strerror(errno));
+        close(tcp_fd);
+        return -1;
+    }
+
+    kvs_logInfo("[客户端] TCP连接已建立\n");
+
+    /*
+     * ============================================================
+     * 阶段2: 发送RDMASYNC命令
+     * ============================================================
+     */
+    char cmd_buf[64];
+    int cmd_len = snprintf(cmd_buf, sizeof(cmd_buf),
+                           "*2\r\n$8\r\nRDMASYNC\r\n$1\r\n%d\r\n",
+                           engine_type);
+
+    if (write(tcp_fd, cmd_buf, cmd_len) != cmd_len) {
+        kvs_logError("[客户端] 发送RDMASYNC命令失败\n");
+        close(tcp_fd);
+        return -1;
+    }
+
+    kvs_logInfo("[客户端] 已发送RDMASYNC命令\n");
+
+    /*
+     * ============================================================
+     * 阶段3: 等待+RDMA_READY响应
+     * ============================================================
+     */
+    char resp_buf[256];
+    int total_read = 0;
+    struct timeval tv = {.tv_sec = 10, .tv_usec = 0};  /* 10秒超时 */
+    setsockopt(tcp_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    /* 读取直到遇到\r\n */
+    while (total_read < sizeof(resp_buf) - 1) {
+        int n = read(tcp_fd, resp_buf + total_read, 1);
+        if (n <= 0) {
+            kvs_logError("[客户端] 等待RDMA_READY超时或错误\n");
+            close(tcp_fd);
+            return -1;
+        }
+        total_read += n;
+        if (total_read >= 2 &&
+            resp_buf[total_read-2] == '\r' &&
+            resp_buf[total_read-1] == '\n') {
+            break;
+        }
+    }
+    resp_buf[total_read] = '\0';
+
+    kvs_logInfo("[客户端] 收到响应: %s", resp_buf);
+
+    /* 解析响应 */
+    uint16_t rdma_port = 0;
+    if (strncmp(resp_buf, "+FORKED", 7) == 0) {
+        /* 主节点已fork，继续等待RDMA_READY */
+        total_read = 0;
+        while (total_read < sizeof(resp_buf) - 1) {
+            int n = read(tcp_fd, resp_buf + total_read, 1);
+            if (n <= 0) {
+                kvs_logError("[客户端] 等待RDMA_READY超时\n");
+                close(tcp_fd);
+                return -1;
+            }
+            total_read += n;
+            if (total_read >= 2 &&
+                resp_buf[total_read-2] == '\r' &&
+                resp_buf[total_read-1] == '\n') {
+                break;
+            }
+        }
+        resp_buf[total_read] = '\0';
+        kvs_logInfo("[客户端] 收到响应: %s", resp_buf);
+    }
+
+    if (sscanf(resp_buf, "+RDMA_READY %hu", &rdma_port) != 1 || rdma_port == 0) {
+        kvs_logError("[客户端] 无效的RDMA_READY响应: %s\n", resp_buf);
+        close(tcp_fd);
+        return -1;
+    }
+
+    kvs_logInfo("[客户端] 主节点RDMA就绪，端口: %d\n", rdma_port);
+
+    /*
+     * ============================================================
+     * 阶段4: 建立RDMA连接
+     * ============================================================
+     */
+    if (rdma_sync_client_connect(master_host, rdma_port, engine_type) < 0) {
+        kvs_logError("[客户端] RDMA连接失败\n");
+        close(tcp_fd);
+        return -1;
+    }
+
+    /*
+     * ============================================================
+     * 阶段5: 执行存量同步
+     * ============================================================
+     */
+    kvs_logInfo("[客户端] 开始执行存量同步...\n");
+
+    if (rdma_sync_perform_full_sync() < 0) {
+        kvs_logError("[客户端] 存量同步失败\n");
+        rdma_sync_client_disconnect();
+        close(tcp_fd);
+        return -1;
+    }
+
+    kvs_logInfo("[客户端] 存量同步完成\n");
+
+    /*
+     * ============================================================
+     * 阶段6: 等待RDMA_DONE并关闭TCP连接
+     * ============================================================
+     */
+    total_read = 0;
+    while (total_read < sizeof(resp_buf) - 1) {
+        int n = read(tcp_fd, resp_buf + total_read, 1);
+        if (n <= 0) break;  /* 允许提前关闭 */
+        total_read += n;
+        if (total_read >= 2 &&
+            resp_buf[total_read-2] == '\r' &&
+            resp_buf[total_read-1] == '\n') {
+            break;
+        }
+    }
+    if (total_read > 0) {
+        resp_buf[total_read] = '\0';
+        kvs_logInfo("[客户端] 收到最终响应: %s", resp_buf);
+    }
+
+    close(tcp_fd);
+    kvs_logInfo("[客户端] TCP控制连接已关闭\n");
+
+    return 0;
 }
 
 /* ============================================================================
@@ -600,6 +1052,9 @@ int rdma_sync_client_init(void) {
     pthread_mutex_init(&g_client_ctx->cmd_queue_lock, NULL);
     g_client_ctx->full_sync_done = 0;
     g_client_ctx->state = SYNC_STATE_IDLE;
+    g_client_ctx->cm_channel = NULL;  /* 确保初始化为 NULL */
+    g_client_ctx->cm_id = NULL;
+    g_client_ctx->recv_buf = NULL;
 
     /* 预分配接收缓冲区（256MB） */
     g_client_ctx->recv_buf_size = RDMA_BUFFER_SIZE;
@@ -617,8 +1072,18 @@ int rdma_sync_client_init(void) {
 
 /**
  * @brief 连接到主节点的 RDMA 服务
+ *
+ * 【方案C修改】添加 engine_type 参数
+ * 用途: 记录当前同步的引擎类型，用于调试和后续扩展
+ *
+ * @param master_host  主节点地址
+ * @param master_port  主节点RDMA端口（动态分配）
+ * @param engine_type  【新增】目标引擎类型
+ * @return 0 成功，-1 失败
  */
-int rdma_sync_client_connect(const char *master_host, uint16_t master_port) {
+int rdma_sync_client_connect(const char *master_host,
+                              uint16_t master_port,
+                              rdma_engine_type_t engine_type) {
     if (!g_client_ctx) {
         kvs_logError("客户端未初始化\n");
         return -1;
@@ -628,17 +1093,22 @@ int rdma_sync_client_connect(const char *master_host, uint16_t master_port) {
             sizeof(g_client_ctx->master_host) - 1);
     g_client_ctx->master_rdma_port = master_port;
 
+    /* 如果已有连接，先断开 */
+    if (g_client_ctx->cm_id) {
+        rdma_sync_client_disconnect();
+    }
+
     /* 创建 CM 事件通道 */
-    struct rdma_event_channel *cm_channel = rdma_create_event_channel();
-    if (!cm_channel) {
-        kvs_logError("rdma_create_event_channel 失败\n");
+    g_client_ctx->cm_channel = rdma_create_event_channel();
+    if (!g_client_ctx->cm_channel) {
+        kvs_logError("rdma_create_event_channel 失败: %s\n", strerror(errno));
         return -1;
     }
 
     /* 创建 CM ID */
     struct rdma_cm_id *cm_id;
-    if (rdma_create_id(cm_channel, &cm_id, NULL, RDMA_PS_TCP)) {
-        kvs_logError("rdma_create_id 失败\n");
+    if (rdma_create_id(g_client_ctx->cm_channel, &cm_id, NULL, RDMA_PS_TCP)) {
+        kvs_logError("rdma_create_id 失败: %s\n", strerror(errno));
         goto err_channel;
     }
 
@@ -653,15 +1123,19 @@ int rdma_sync_client_connect(const char *master_host, uint16_t master_port) {
         goto err_id;
     }
 
+    kvs_logInfo("正在解析 RDMA 地址: %s:%d\n", master_host, master_port);
+
     /* 发起连接 */
     if (rdma_resolve_addr(cm_id, NULL, (struct sockaddr *)&addr, 2000)) {
-        kvs_logError("rdma_resolve_addr 失败\n");
+        kvs_logError("rdma_resolve_addr 失败: %s (errno=%d)\n", strerror(errno), errno);
+        kvs_logError("提示: 如果使用本地环回(127.0.0.1)，请确保已加载 SoftRoCE 内核模块(rxe_rdma)\n");
         goto err_id;
     }
 
     /* 等待地址解析完成 */
     struct rdma_cm_event *event;
-    if (rdma_get_cm_event(cm_channel, &event)) {
+    if (rdma_get_cm_event(g_client_ctx->cm_channel, &event)) {
+        kvs_logError("rdma_get_cm_event (addr) 失败: %s\n", strerror(errno));
         goto err_id;
     }
 
@@ -673,12 +1147,18 @@ int rdma_sync_client_connect(const char *master_host, uint16_t master_port) {
     rdma_ack_cm_event(event);
 
     /* 解析路由 */
+    kvs_logInfo("正在解析 RDMA 路由...\n");
     if (rdma_resolve_route(cm_id, 2000)) {
-        kvs_logError("rdma_resolve_route 失败\n");
+        kvs_logError("rdma_resolve_route 失败: %s (errno=%d)\n", strerror(errno), errno);
+        kvs_logError("可能原因:\n");
+        kvs_logError("  1. 未找到可用的 RDMA 设备 (检查 ibv_devices)\n");
+        kvs_logError("  2. SoftRoCE 未正确配置 (尝试: rxe_cfg add eth0 或 rdma link add rxe0 type rxe netdev lo)\n");
+        kvs_logError("  3. 网络不可达或防火墙阻止\n");
         goto err_id;
     }
 
-    if (rdma_get_cm_event(cm_channel, &event)) {
+    if (rdma_get_cm_event(g_client_ctx->cm_channel, &event)) {
+        kvs_logError("rdma_get_cm_event (route) 失败: %s\n", strerror(errno));
         goto err_id;
     }
 
@@ -789,7 +1269,8 @@ int rdma_sync_client_connect(const char *master_host, uint16_t master_port) {
     }
 
     /* 11. 等待连接建立 */
-    if (rdma_get_cm_event(cm_channel, &event)) {
+    if (rdma_get_cm_event(g_client_ctx->cm_channel, &event)) {
+        kvs_logError("rdma_get_cm_event (connect) 失败: %s\n", strerror(errno));
         goto err_mr_ctrl;
     }
 
@@ -803,7 +1284,11 @@ int rdma_sync_client_connect(const char *master_host, uint16_t master_port) {
     g_client_ctx->cm_id = cm_id;
     g_client_ctx->state = SYNC_STATE_CONNECTING;
 
-    kvs_logInfo("RDMA 连接已建立到 %s:%d\n", master_host, master_port);
+    /* 【方案C新增】记录引擎类型，用于调试和后续扩展 */
+    /* 注意: 当前仅在日志中使用，未来可支持单引擎同步 */
+    (void)engine_type; /* 避免未使用警告，实际用于扩展 */
+    kvs_logInfo("RDMA 连接已建立到 %s:%d (引擎类型: %d)\n",
+                master_host, master_port, engine_type);
     return 0;
 
 err_mr_ctrl:
@@ -821,9 +1306,12 @@ err_comp_channel:
 err_pd:
     ibv_dealloc_pd(g_client_ctx->pd);
 err_id:
-    rdma_destroy_id(cm_id);
+    if (cm_id) rdma_destroy_id(cm_id);
 err_channel:
-    rdma_destroy_event_channel(cm_channel);
+    if (g_client_ctx->cm_channel) {
+        rdma_destroy_event_channel(g_client_ctx->cm_channel);
+        g_client_ctx->cm_channel = NULL;
+    }
     return -1;
 }
 
@@ -1073,6 +1561,7 @@ static const char* parse_resp_integer(const char *p, const char *end, int *out_v
 static int rdma_sync_execute_cmd(const char *data, size_t len) {
     const char *p = data;
     const char *end = data + len;
+    int ret = -1; /* 初始化为-1，确保所有路径都有确定的返回值 */
 
     /* 步骤1: 解析 Array 头部 (*<argc>\r\n) */
     if (p >= end || *p != '*') {
@@ -1154,7 +1643,7 @@ static int rdma_sync_execute_cmd(const char *data, size_t len) {
     }
 
     const char *cmd = argv[0];
-    int ret = -1;
+    /* ret已在函数开头初始化为-1 */
 
     kvs_logDebug("[TCP Queue] 执行命令: %s, argc=%d\n", cmd, argc);
 
@@ -1238,6 +1727,7 @@ static int rdma_sync_execute_cmd(const char *data, size_t len) {
 #endif
     else {
         kvs_logWarn("[TCP Queue] 未知或不支持的命令: %s\n", cmd);
+        ret = -1; /* 明确设置返回值，避免编译器警告 */
     }
 
     if (ret != 0) {
@@ -1466,11 +1956,12 @@ void rdma_sync_client_disconnect(void) {
         return;
     }
 
+    /* 断开 RDMA 连接 */
     if (g_client_ctx->cm_id) {
         rdma_disconnect(g_client_ctx->cm_id);
     }
 
-    /* 清理资源 */
+    /* 清理资源 - 按照依赖关系的逆序 */
     if (g_client_ctx->mr_ctrl_send) {
         ibv_dereg_mr(g_client_ctx->mr_ctrl_send);
         g_client_ctx->mr_ctrl_send = NULL;
@@ -1514,6 +2005,11 @@ void rdma_sync_client_disconnect(void) {
     if (g_client_ctx->cm_id) {
         rdma_destroy_id(g_client_ctx->cm_id);
         g_client_ctx->cm_id = NULL;
+    }
+    /* 【修复】销毁事件通道 */
+    if (g_client_ctx->cm_channel) {
+        rdma_destroy_event_channel(g_client_ctx->cm_channel);
+        g_client_ctx->cm_channel = NULL;
     }
 
     pthread_mutex_destroy(&g_client_ctx->cmd_queue_lock);

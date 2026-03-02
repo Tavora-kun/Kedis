@@ -173,7 +173,8 @@ const char*
                  "AGET", "ADEL", "AMOD", "AEXIST", "HSET", "HGET",
                  "HDEL", "HMOD", "HEXIST", "RSET", "RGET", "RDEL",
                  "RMOD", "REXIST", "SSET", "SGET", "SDEL", "SMOD",
-                 "SEXIST", "SAVE", "BGSAVE", "SYNC", "REPLICAOF"};    // 添加SAVE、BGSAVE、SYNC和REPLICAOF命令
+                 "SEXIST", "SAVE", "BGSAVE", "SYNC", "REPLICAOF",
+                 "RDMASYNC"};    // 添加SAVE、BGSAVE、SYNC、REPLICAOF和RDMASYNC命令
 
 // 自动保存参数：save seconds changes
 // static int save_params_seconds = 300;        // 5分钟
@@ -652,6 +653,87 @@ int kvs_protocol(struct conn* c) {
                 return 0;
             }
             return kvs_cmd_replicaof(c, c->argc, c->argv);  // 调用 sync_command.c 中的处理函数
+
+        case KVS_CMD_RDMASYNC:
+            /*
+             * 【方案C核心】RDMASYNC 命令处理
+             *
+             * 功能: 从节点通过此命令触发主节点fork子进程进行RDMA同步
+             *
+             * 执行流程:
+             *   1. 检查是否为主节点（从节点不应收到此命令）
+             *   2. 解析引擎类型参数
+             *   3. fork子进程
+             *   4. 子进程调用rdma_sync_child_server()处理RDMA同步
+             *   5. 父进程立即返回+FORKED，继续处理其他连接
+             *
+             * 注意事项:
+             *   - 此命令会移交TCP连接fd给子进程，父进程不再处理此连接
+             *   - 子进程完成同步后自动exit()，通过原TCP连接发送+RDMA_DONE
+             */
+            {
+                /* 1. 检查是否为主节点 */
+                if (g_config.replica_mode != REPLICA_MODE_MASTER) {
+                    add_reply_error(c, "RDMASYNC only available on master");
+                    return 0;
+                }
+
+                /* 2. 检查参数 */
+                if (c->argc < 2) {
+                    add_reply_error(c, "wrong number of arguments for 'rdmasync' command");
+                    return 0;
+                }
+
+                /* 3. 解析引擎类型 */
+                int engine_type = atoi(c->argv[1].ptr);
+                if (engine_type < 0 || engine_type > ENGINE_COUNT) {
+                    add_reply_error(c, "invalid engine type");
+                    return 0;
+                }
+
+                /* 4. fork子进程 */
+                pid_t pid = fork();
+                if (pid < 0) {
+                    kvs_logError("[RDMASYNC] fork失败: %s\n", strerror(errno));
+                    add_reply_error(c, "fork failed");
+                    return 0;
+                }
+
+                if (pid == 0) {
+                    /* ========== 子进程 ========== */
+                    /* 子进程接管TCP fd，处理RDMA同步 */
+                    int tcp_fd = c->fd;
+
+                    /*
+                     * 注意: 子进程继承父进程的内存空间（COW），
+                     * 但父进程的io_uring/epoll等资源不应使用。
+                     * rdma_sync_child_server()会关闭除tcp_fd外的所有fd。
+                     */
+                    int ret = rdma_sync_child_server(tcp_fd, (rdma_engine_type_t)engine_type);
+
+                    /* 子进程直接exit，不返回 */
+                    exit(ret == 0 ? 0 : 1);
+                }
+
+                /* ========== 父进程 ========== */
+                kvs_logInfo("[RDMASYNC] 已fork子进程(pid=%d)处理RDMA同步\n", pid);
+
+                /*
+                 * 发送+FORKED响应给客户端
+                 * 子进程随后会发送+RDMA_READY和+RDMA_DONE
+                 */
+                add_reply_status(c, "FORKED");
+
+                /*
+                 * 重要: 标记连接fd为已移交
+                 * 防止父进程在连接清理时关闭该fd（子进程正在使用）
+                 */
+                c->fd = -1;  /* fd已移交给子进程 */
+                c->state = ST_CLOSE;  /* 标记连接需要清理（但不关闭fd） */
+
+                return 0;
+            }
+
         default:
             add_reply_error(c, "UNKNOWN COMMAND");
     }

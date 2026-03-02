@@ -90,6 +90,26 @@ enum {
     KVS_CMD_SYNC,
     KVS_CMD_REPLICAOF,  // 设置/取消主从复制关系: REPLICAOF <host> <port> 或 REPLICAOF NO ONE
 
+    /*
+     * 【方案C新增】RDMASYNC 命令
+     *
+     * 用途: 从节点发送给主节点，触发fork子进程进行RDMA存量同步
+     * 语法: RDMASYNC <engine_type>
+     *       engine_type: 0-3表示特定引擎，4表示所有引擎
+     *
+     * 响应:
+     *   +FORKED\r\n      - 主节点已fork子进程
+     *   +RDMA_READY <port>\r\n  - 子进程RDMA服务器就绪，携带动态端口
+     *   +RDMA_DONE\r\n  - 同步完成
+     *   -ERR ...\r\n    - 发生错误
+     *
+     * 注意事项:
+     *   - 此命令只能在主节点执行
+     *   - 执行此命令后，当前TCP连接的fd将移交给fork出的子进程
+     *   - 父进程立即返回+FORKED，后续通信由子进程处理
+     */
+    KVS_CMD_RDMASYNC,
+
     KVS_CMD_COUNT
 };
 

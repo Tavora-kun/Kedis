@@ -151,6 +151,7 @@ struct rdma_sync_context {
  */
 struct rdma_client_context {
     /* RDMA 连接资源 */
+    struct rdma_event_channel *cm_channel;  /* CM事件通道 */
     struct rdma_cm_id       *cm_id;
     struct ibv_pd           *pd;
     struct ibv_cq           *cq;
@@ -193,28 +194,76 @@ struct cmd_buffer {
 };
 
 /* ============================================================================
- * 主节点（Server）接口
- * ============================================================================ */
+ * 主节点（Server）接口 - 方案C重构 (TCP-Triggered Fork)
+ * ============================================================================
+ *
+ * 架构变更说明:
+ *   原方案(方案A/B): 主节点启动时创建常驻RDMA监听线程，持续占用资源
+ *   新方案(方案C): 收到TCP的RDMASYNC命令时fork子进程，子进程临时创建RDMA服务器
+ *
+ * 优势:
+ *   1. 主进程完全无阻塞，无需处理RDMA事件
+ *   2. 无常驻资源占用，仅在同步时分配
+ *   3. 简化架构，避免io_uring与RDMA的并发冲突
+ */
 
 /*
- * 初始化 RDMA 同步服务器
- * 在主节点启动时调用，监听 RDMA 连接请求
- * @param listen_port: 监听端口（通常为 g_config.port + RDMA_PORT_OFFSET）
- * @return: 0 成功，-1 失败
+ * 【方案C新增】子进程RDMA服务器主函数
+ *
+ * 功能: fork出的子进程调用此函数，完成单个子节点的RDMA存量同步
+ *
+ * 设计原理:
+ *   - 子进程拥有父进程内存快照(COW)，数据一致性由fork保证
+ *   - 子进程通过原TCP连接发送控制信号(+RDMA_READY, +RDMA_DONE)
+ *   - 子进程独立管理RDMA连接生命周期，父进程零参与
+ *
+ * 参数:
+ *   @tcp_fd: 从节点TCP连接fd，子进程通过此fd发送控制信号
+ *            注意: 子进程接管此fd，父进程应立即放弃该连接
+ *   @engine_type: 需要同步的引擎类型
+ *                 当前实现: ENGINE_COUNT表示所有引擎循环同步
+ *                 未来扩展: 可指定单个引擎进行部分同步
+ *
+ * 返回值:
+ *   0  - 同步成功完成
+ *   -1 - 同步过程中发生错误
+ *
+ * 子进程生命周期:
+ *   1. 【fd清理】关闭除tcp_fd外的所有fd，避免与父进程冲突
+ *   2. 【RDMA初始化】创建event_channel, cm_id, 绑定动态端口
+ *   3. 【就绪通知】通过TCP发送"+RDMA_READY <rdma_port>\r\n"
+ *   4. 【等待连接】接受从节点的RDMA连接请求
+ *   5. 【数据同步】循环处理PREPARE/READY/READ/COMPLETE流程
+ *   6. 【完成通知】发送"+RDMA_DONE\r\n"，关闭TCP连接
+ *   7. 【资源清理】断开RDMA，释放MR，退出进程
+ *
+ * 父进程注意事项:
+ *   - fork()返回后应立即回复"+FORKED"给客户端
+ *   - 将连接fd标记为已移交，避免父进程关闭
+ *   - 子进程退出时会发送SIGCHLD，可选择忽略或收割
  */
-int rdma_sync_server_init(uint16_t listen_port);
+int rdma_sync_child_server(int tcp_fd, rdma_engine_type_t engine_type);
 
 /*
- * 停止 RDMA 同步服务器
- * 关闭所有连接，释放资源
+ * 【废弃-方案A/B遗留】初始化 RDMA 同步服务器
+ * 原因: 方案C使用TCP触发fork，无需常驻监听
+ * 状态: 保留声明避免编译错误，但实现为空函数直接返回0
  */
-void rdma_sync_server_stop(void);
+int rdma_sync_server_init(uint16_t listen_port) __attribute__((deprecated("使用方案C: TCP触发fork")));
 
 /*
- * 处理 RDMA 事件（主节点事件循环中调用）
- * 非阻塞方式处理连接请求和数据传输
+ * 【废弃-方案A/B遗留】停止 RDMA 同步服务器
+ * 原因: 子进程退出即自动清理，无需显式停止
+ * 状态: 保留声明，实现为空函数
  */
-void rdma_sync_server_poll(void);
+void rdma_sync_server_stop(void) __attribute__((deprecated("使用方案C: 子进程自动清理")));
+
+/*
+ * 【废弃-方案A/B遗留】处理 RDMA 事件
+ * 原因: 方案C子进程中使用阻塞式处理
+ * 状态: 保留声明，实现为空函数
+ */
+void rdma_sync_server_poll(void) __attribute__((deprecated("使用方案C: 子进程阻塞处理")));
 
 /*
  * 为主节点的存量同步准备指定引擎的数据
@@ -241,27 +290,107 @@ int rdma_sync_master_prepare_engine(struct rdma_sync_context *ctx,
 void rdma_sync_master_cleanup(struct rdma_sync_context *ctx);
 
 /* ============================================================================
- * 从节点（Client）接口
- * ============================================================================ */
+ * 从节点（Client）接口 - 方案C更新 (TCP-First连接)
+ * ============================================================================
+ *
+ * 架构变更说明:
+ *   原方案: 直接连接主节点的RDMA端口，主节点需常驻监听
+ *   新方案: 先TCP连接，发送RDMASYNC命令触发fork，再连接动态分配的RDMA端口
+ *
+ * 连接流程对比:
+ *   方案A/B: socket(RDMA) -> connect() -> 直接RDMA通信
+ *   方案C:   socket(TCP) -> connect() -> send RDMASYNC
+ *            recv(+RDMA_READY <port>) -> socket(RDMA) -> connect(<port>)
+ */
 
 /*
- * 初始化 RDMA 同步客户端
- * 在从节点启动时调用（如果配置了主节点）
- * 但不立即连接，等待 REPLICAOF/SYNC 命令
+ * 【保留】初始化 RDMA 同步客户端
  *
- * @return: 0 成功，-1 失败
+ * 功能: 分配和初始化客户端上下文g_client_ctx
+ * 时机: 从节点启动时调用，或REPLICAOF设置后调用
+ * 注意: 此函数不建立任何连接，仅准备资源
  */
 int rdma_sync_client_init(void);
 
 /*
- * 连接到主节点的 RDMA 服务
- * 执行完整的 RDMA 连接建立流程
+ * 【方案C新增】通过TCP连接触发并执行RDMA存量同步
  *
- * @param master_host: 主节点地址
- * @param master_port: 主节点 RDMA 端口
- * @return: 0 成功，-1 失败
+ * 功能: 从节点主入口函数，完成TCP触发 -> RDMA同步的全流程
+ *
+ * 设计原理:
+ *   - 封装方案C的完整连接流程，对外提供统一接口
+ *   - 内部处理TCP控制信道和RDMA数据信道的协调
+ *   - 保持与原有rdma_sync_perform_full_sync()的调用时机一致
+ *
+ * 参数:
+ *   @master_host: 主节点IP地址或主机名
+ *   @master_port: 主节点TCP服务端口(非RDMA端口)
+ *   @engine_type: 需要同步的引擎类型
+ *                 ENGINE_COUNT表示同步所有引擎
+ *
+ * 返回值:
+ *   0  - 同步成功，数据已加载到本地引擎
+ *   -1 - 同步失败，可能原因:
+ *        * TCP连接失败
+ *        * 主节点fork失败
+ *        * RDMA连接失败
+ *        * 数据传输错误
+ *
+ * 执行流程:
+ *   ┌─────────────────────────────────────────────────────┐
+ *   │  1. 建立TCP连接到主节点master_port                   │
+ *   │     socket() -> connect()                           │
+ *   ├─────────────────────────────────────────────────────┤
+ *   │  2. 发送RDMASYNC命令                                 │
+ *   │     write("*2\r\n$8\r\nRDMASYNC\r\n...")            │
+ *   ├─────────────────────────────────────────────────────┤
+ *   │  3. 等待并解析+RDMA_READY响应                        │
+ *   │     read() -> parse "+RDMA_READY <rdma_port>"       │
+ *   │     超时: 10秒                                      │
+ *   ├─────────────────────────────────────────────────────┤
+ *   │  4. 建立RDMA连接到动态端口                           │
+ *   │     rdma_create_id() -> rdma_resolve_addr()         │
+ *   │     -> rdma_connect()                               │
+ *   ├─────────────────────────────────────────────────────┤
+ *   │  5. 执行存量同步                                     │
+ *   │     循环: send PREPARE -> wait READY -> RDMA Read   │
+ *   │     -> send COMPLETE                                │
+ *   ├─────────────────────────────────────────────────────┤
+ *   │  6. 等待+RDMA_DONE响应，清理TCP连接                  │
+ *   │     read("+RDMA_DONE") -> close(tcp_fd)             │
+ *   └─────────────────────────────────────────────────────┘
+ *
+ * 与原有流程对比:
+ *   - 原rdma_sync_client_connect()只处理上述流程的步骤4
+ *   - 此函数封装完整流程，替代start_slave_sync()中的连接部分
  */
-int rdma_sync_client_connect(const char *master_host, uint16_t master_port);
+int rdma_sync_client_start_via_tcp(const char *master_host,
+                                    uint16_t master_port,
+                                    rdma_engine_type_t engine_type);
+
+/*
+ * 【修改-添加参数】连接到主节点的 RDMA 服务
+ *
+ * 变更说明:
+ *   原签名: rdma_sync_client_connect(const char *host, uint16_t port)
+ *   新签名: rdma_sync_client_connect(const char *host, uint16_t port, rdma_engine_type_t type)
+ *
+ * 变更原因:
+ *   - 方案C中子进程需要知道要同步哪个引擎，以决定生成哪个引擎的快照
+ *   - 虽然当前通过控制消息传递引擎类型，但连接时记录便于调试
+ *
+ * 参数:
+ *   @master_host:  主节点地址
+ *   @master_port:  主节点RDMA端口(动态分配，非固定偏移)
+ *   @engine_type: 【新增】目标引擎类型，存入g_client_ctx供后续使用
+ *
+ * 注意:
+ *   此函数现在由rdma_sync_client_start_via_tcp()内部调用
+ *   不建议外部直接调用，应使用tcp-first接口
+ */
+int rdma_sync_client_connect(const char *master_host,
+                              uint16_t master_port,
+                              rdma_engine_type_t engine_type);
 
 /*
  * 执行完整的存量同步
