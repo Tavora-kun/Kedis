@@ -9,6 +9,7 @@
 
 #include <pthread.h>
 #include <string.h>
+#include <errno.h>
 
 /* 外部全局变量 */
 extern struct rdma_client_context *g_client_ctx;
@@ -234,6 +235,13 @@ int sync_module_init(void) {
          * 同步请求通过TCP命令触发，动态fork子进程处理
          */
         kvs_logInfo("[SYNC] 主节点同步模块初始化（方案C: TCP触发fork）\n");
+
+        /* 初始化fork支持：必须在任何RDMA操作前调用，否则子进程无法使用RDMA */
+        if (ibv_fork_init()) {
+            kvs_logError("[SYNC] ibv_fork_init() 失败: %s\n", strerror(errno));
+            return -1;
+        }
+        kvs_logInfo("[SYNC] ibv_fork_init() 成功\n");
 
         /* 可以在这里创建临时目录等准备工作 */
         /* mkdir(RDMA_SYNC_TEMP_DIR, 0755); */
