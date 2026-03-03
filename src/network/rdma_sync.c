@@ -258,96 +258,6 @@ static void cleanup_connection_resources(struct rdma_sync_context *ctx) {
     }
 }
 
-/*
- * ============================================================================
- * 【方案C废弃】常驻服务器相关函数
- * ============================================================================
- *
- * 以下函数为方案A/B的常驻RDMA服务器实现，方案C中不再使用。
- * 方案C使用TCP触发fork子进程的方式，子进程中临时创建RDMA服务器。
- *
- * 保留这些函数定义（用#if 0包裹）以便：
- *   1. 代码考古和参考
- *   2. 未来如需回退到常驻服务器方案
- *   3. 理解两种架构的差异
- */
-#if 0
-
-/**
- * @brief 处理新的连接请求
- *
- * 在 RDMA_CM_EVENT_CONNECT_REQUEST 事件时调用
- */
-static void handle_connect_request(struct rdma_cm_id *id) {
-    struct rdma_sync_context *ctx = kvs_calloc(1, sizeof(struct rdma_sync_context));
-    if (!ctx) {
-        kvs_logError("分配同步上下文失败\n");
-        rdma_reject(id, NULL, 0);
-        return;
-    }
-
-    ctx->cm_id = id;
-    ctx->state = SYNC_STATE_IDLE;
-    ctx->temp_fd = -1;
-    id->context = ctx;
-
-    /* 创建连接资源 */
-    if (setup_connection_resources(ctx) < 0) {
-        kvs_logError("设置连接资源失败\n");
-        free(ctx);
-        rdma_reject(id, NULL, 0);
-        return;
-    }
-
-    /* 接受连接 */
-    struct rdma_conn_param conn_param = {
-        .responder_resources = 1,
-        .initiator_depth = 1,
-        .retry_count = 5
-    };
-
-    if (rdma_accept(id, &conn_param)) {
-        kvs_logError("rdma_accept 失败\n");
-        cleanup_connection_resources(ctx);
-        free(ctx);
-        return;
-    }
-
-    /* 添加到从节点链表 */
-    pthread_mutex_lock(&g_slaves_lock);
-    ctx->next = g_slaves_head;
-    g_slaves_head = ctx;
-    pthread_mutex_unlock(&g_slaves_lock);
-
-    kvs_logInfo("接受从节点 RDMA 连接\n");
-}
-
-/**
- * @brief 处理断开连接
- */
-static void handle_disconnect(struct rdma_cm_id *id) {
-    struct rdma_sync_context *ctx = id->context;
-
-    /* 从链表中移除 */
-    pthread_mutex_lock(&g_slaves_lock);
-    struct rdma_sync_context **curr = &g_slaves_head;
-    while (*curr) {
-        if (*curr == ctx) {
-            *curr = ctx->next;
-            break;
-        }
-        curr = &(*curr)->next;
-    }
-    pthread_mutex_unlock(&g_slaves_lock);
-
-    /* 清理资源 */
-    cleanup_connection_resources(ctx);
-    rdma_destroy_id(id);
-    free(ctx);
-
-    kvs_logInfo("从节点 RDMA 连接已断开\n");
-}
-
 /**
  * @brief 为指定引擎创建 KSF 快照
  *
@@ -479,6 +389,96 @@ void rdma_sync_master_cleanup(struct rdma_sync_context *ctx) {
         ctx->temp_path[0] = '\0';
     }
     ctx->state = SYNC_STATE_IDLE;
+}
+
+/*
+ * ============================================================================
+ * 【方案C废弃】常驻服务器相关函数
+ * ============================================================================
+ *
+ * 以下函数为方案A/B的常驻RDMA服务器实现，方案C中不再使用。
+ * 方案C使用TCP触发fork子进程的方式，子进程中临时创建RDMA服务器。
+ *
+ * 保留这些函数定义（用#if 0包裹）以便：
+ *   1. 代码考古和参考
+ *   2. 未来如需回退到常驻服务器方案
+ *   3. 理解两种架构的差异
+ */
+#if 0
+
+/**
+ * @brief 处理新的连接请求
+ *
+ * 在 RDMA_CM_EVENT_CONNECT_REQUEST 事件时调用
+ */
+static void handle_connect_request(struct rdma_cm_id *id) {
+    struct rdma_sync_context *ctx = kvs_calloc(1, sizeof(struct rdma_sync_context));
+    if (!ctx) {
+        kvs_logError("分配同步上下文失败\n");
+        rdma_reject(id, NULL, 0);
+        return;
+    }
+
+    ctx->cm_id = id;
+    ctx->state = SYNC_STATE_IDLE;
+    ctx->temp_fd = -1;
+    id->context = ctx;
+
+    /* 创建连接资源 */
+    if (setup_connection_resources(ctx) < 0) {
+        kvs_logError("设置连接资源失败\n");
+        free(ctx);
+        rdma_reject(id, NULL, 0);
+        return;
+    }
+
+    /* 接受连接 */
+    struct rdma_conn_param conn_param = {
+        .responder_resources = 1,
+        .initiator_depth = 1,
+        .retry_count = 5
+    };
+
+    if (rdma_accept(id, &conn_param)) {
+        kvs_logError("rdma_accept 失败\n");
+        cleanup_connection_resources(ctx);
+        free(ctx);
+        return;
+    }
+
+    /* 添加到从节点链表 */
+    pthread_mutex_lock(&g_slaves_lock);
+    ctx->next = g_slaves_head;
+    g_slaves_head = ctx;
+    pthread_mutex_unlock(&g_slaves_lock);
+
+    kvs_logInfo("接受从节点 RDMA 连接\n");
+}
+
+/**
+ * @brief 处理断开连接
+ */
+static void handle_disconnect(struct rdma_cm_id *id) {
+    struct rdma_sync_context *ctx = id->context;
+
+    /* 从链表中移除 */
+    pthread_mutex_lock(&g_slaves_lock);
+    struct rdma_sync_context **curr = &g_slaves_head;
+    while (*curr) {
+        if (*curr == ctx) {
+            *curr = ctx->next;
+            break;
+        }
+        curr = &(*curr)->next;
+    }
+    pthread_mutex_unlock(&g_slaves_lock);
+
+    /* 清理资源 */
+    cleanup_connection_resources(ctx);
+    rdma_destroy_id(id);
+    free(ctx);
+
+    kvs_logInfo("从节点 RDMA 连接已断开\n");
 }
 
 /**
@@ -797,19 +797,211 @@ int rdma_sync_child_server(int tcp_fd, rdma_engine_type_t engine_type) {
      * ============================================================
      * 阶段5: 引擎同步循环
      * ============================================================
+     *
+     * 控制流循环:
+     *   1. 接收从节点的 PREPARE 命令 (RDMA Send/Recv)
+     *   2. 准备引擎快照 (ksfWrite -> mmap -> ibv_reg_mr)
+     *   3. 发送 READY 响应，携带 MR 元数据 (addr, rkey, length)
+     *   4. 等待从节点通过 RDMA Read 读取数据
+     *   5. 接收 COMPLETE 命令
+     *   6. 清理当前引擎资源，继续下一个
+     *
+     * 注意: setup_connection_resources 已经分配了 ctx.ctrl_buf 和 ctx.mr_ctrl
+     *       并且已经预投递了接收请求，我们直接使用这些资源。
      */
+
+    /* 确定要同步的引擎范围 */
     int engine_start = (engine_type == ENGINE_COUNT) ? 0 : engine_type;
     int engine_end = (engine_type == ENGINE_COUNT) ? ENGINE_COUNT : engine_type + 1;
 
     for (int eng = engine_start; eng < engine_end; eng++) {
         rdma_engine_type_t current_engine = (rdma_engine_type_t)eng;
-        kvs_logInfo("[子进程] 准备同步引擎: %s\n",
+        kvs_logInfo("[子进程] 等待同步引擎: %s\n",
                     rdma_sync_engine_name(current_engine));
 
-        /* TODO: 实现完整的PREPARE/READY/READ/COMPLETE流程 */
-        /* 这里先发送错误，表示功能待实现 */
-        kvs_logWarn("[子进程] 引擎同步流程待实现\n");
-        break;
+        /*
+         * 步骤1: 等待 PREPARE 命令
+         */
+        struct ibv_wc wc;
+        int ret;
+
+        do {
+            ret = ibv_poll_cq(ctx.cq, 1, &wc);
+        } while (ret == 0);
+
+        if (ret < 0 || wc.status != IBV_WC_SUCCESS) {
+            kvs_logError("[子进程] 接收 PREPARE 失败, status=%d\n", wc.status);
+            goto err_conn;
+        }
+
+        if (wc.opcode != IBV_WC_RECV) {
+            kvs_logError("[子进程] 意外的 WC opcode: %d\n", wc.opcode);
+            goto err_conn;
+        }
+
+        /* 解析控制消息 - 从 ctx.ctrl_buf 读取 */
+        struct rdma_ctrl_msg *req = (struct rdma_ctrl_msg *)ctx.ctrl_buf;
+        if (req->cmd != CTRL_CMD_PREPARE) {
+            kvs_logError("[子进程] 预期 PREPARE 命令, 收到: %d\n", req->cmd);
+            /* 重新投递接收请求并继续等待 */
+            struct ibv_recv_wr recv_wr = {
+                .wr_id = 1,
+                .num_sge = 1,
+                .sg_list = &(struct ibv_sge){
+                    .addr = (uint64_t)ctx.ctrl_buf,
+                    .length = sizeof(struct rdma_ctrl_msg),
+                    .lkey = ctx.mr_ctrl->lkey
+                }
+            };
+            struct ibv_recv_wr *bad_recv_wr;
+            ibv_post_recv(ctx.qp, &recv_wr, &bad_recv_wr);
+            eng--;
+            continue;
+        }
+
+        kvs_logInfo("[子进程] 收到 PREPARE 命令，引擎: %s\n",
+                    rdma_sync_engine_name(req->engine_type));
+
+        /*
+         * 步骤2: 准备引擎数据
+         */
+        if (rdma_sync_master_prepare_engine(&ctx, current_engine) < 0) {
+            kvs_logError("[子进程] 准备引擎 %s 失败\n",
+                         rdma_sync_engine_name(current_engine));
+            /* 发送错误响应 */
+            struct rdma_ctrl_msg resp = {
+                .cmd = CTRL_RESP_ERROR,
+                .engine_type = current_engine,
+                .error_code = 1
+            };
+            snprintf(resp.payload.error_msg, sizeof(resp.payload.error_msg),
+                     "Failed to prepare engine %s", rdma_sync_engine_name(current_engine));
+            goto err_conn;
+        }
+
+        /*
+         * 步骤3: 发送 READY 响应
+         */
+        struct rdma_ctrl_msg resp = {
+            .cmd = CTRL_RESP_READY,
+            .engine_type = current_engine
+        };
+        resp.payload.buf_attr.addr = (uint64_t)ctx.data_buf;
+        resp.payload.buf_attr.length = (uint32_t)ctx.data_buf_size;
+        resp.payload.buf_attr.rkey = ctx.mr_data->rkey;
+
+        /* 使用 ctx.ctrl_buf 作为发送缓冲区（复用） */
+        memcpy(ctx.ctrl_buf, &resp, sizeof(resp));
+
+        struct ibv_sge send_sge = {
+            .addr = (uint64_t)ctx.ctrl_buf,
+            .length = sizeof(resp),
+            .lkey = ctx.mr_ctrl->lkey
+        };
+        struct ibv_send_wr send_wr = {
+            .wr_id = 2,
+            .opcode = IBV_WR_SEND,
+            .send_flags = IBV_SEND_SIGNALED,
+            .num_sge = 1,
+            .sg_list = &send_sge
+        };
+        struct ibv_send_wr *bad_send_wr;
+
+        if (ibv_post_send(ctx.qp, &send_wr, &bad_send_wr)) {
+            kvs_logError("[子进程] 发送 READY 失败\n");
+            rdma_sync_master_cleanup(&ctx);
+            goto err_conn;
+        }
+
+        /* 等待发送完成 */
+        do {
+            ret = ibv_poll_cq(ctx.cq, 1, &wc);
+        } while (ret == 0);
+
+        if (ret < 0 || wc.status != IBV_WC_SUCCESS) {
+            kvs_logError("[子进程] 发送 READY 完成失败\n");
+            rdma_sync_master_cleanup(&ctx);
+            goto err_conn;
+        }
+
+        kvs_logInfo("[子进程] 已发送 READY: addr=%lx, rkey=%u, len=%zu\n",
+                    (uint64_t)ctx.data_buf, ctx.mr_data->rkey, ctx.data_buf_size);
+
+        /*
+         * 步骤4: 等待 COMPLETE 命令
+         *
+         * 从节点收到 READY 后会:
+         *   1. 执行 RDMA Read 读取数据 (服务器端无感知)
+         *   2. 解析并加载 KSF 数据
+         *   3. 发送 COMPLETE 命令
+         *
+         * 注意: 如果 data_len == 0 (空引擎), 从节点仍会发送 COMPLETE
+         */
+
+        /* 重新投递接收请求 */
+        memset(ctx.ctrl_buf, 0, sizeof(struct rdma_ctrl_msg));
+        struct ibv_recv_wr recv_wr = {
+            .wr_id = 1,
+            .num_sge = 1,
+            .sg_list = &(struct ibv_sge){
+                .addr = (uint64_t)ctx.ctrl_buf,
+                .length = sizeof(struct rdma_ctrl_msg),
+                .lkey = ctx.mr_ctrl->lkey
+            }
+        };
+        struct ibv_recv_wr *bad_recv_wr;
+        if (ibv_post_recv(ctx.qp, &recv_wr, &bad_recv_wr)) {
+            kvs_logError("[子进程] 重新投递接收请求失败\n");
+            rdma_sync_master_cleanup(&ctx);
+            goto err_conn;
+        }
+
+        /* 等待 COMPLETE */
+        do {
+            ret = ibv_poll_cq(ctx.cq, 1, &wc);
+        } while (ret == 0);
+
+        if (ret < 0 || wc.status != IBV_WC_SUCCESS) {
+            kvs_logError("[子进程] 接收 COMPLETE 失败\n");
+            rdma_sync_master_cleanup(&ctx);
+            goto err_conn;
+        }
+
+        req = (struct rdma_ctrl_msg *)ctx.ctrl_buf;
+        if (req->cmd != CTRL_CMD_COMPLETE) {
+            kvs_logError("[子进程] 预期 COMPLETE 命令, 收到: %d\n", req->cmd);
+            rdma_sync_master_cleanup(&ctx);
+            goto err_conn;
+        }
+
+        kvs_logInfo("[子进程] 收到 COMPLETE 命令，引擎 %s 同步完成\n",
+                    rdma_sync_engine_name(current_engine));
+
+        /*
+         * 步骤5: 清理当前引擎资源
+         */
+        rdma_sync_master_cleanup(&ctx);
+
+        /* 检查是否是最后一个引擎，如果是则等待 DONE 命令 */
+        if (eng == engine_end - 1) {
+            /* 重新投递接收请求，等待 DONE 命令 */
+            memset(ctx.ctrl_buf, 0, sizeof(struct rdma_ctrl_msg));
+            if (ibv_post_recv(ctx.qp, &recv_wr, &bad_recv_wr)) {
+                kvs_logError("[子进程] 投递接收请求失败\n");
+                goto err_conn;
+            }
+
+            do {
+                ret = ibv_poll_cq(ctx.cq, 1, &wc);
+            } while (ret == 0);
+
+            if (ret > 0 && wc.status == IBV_WC_SUCCESS && wc.opcode == IBV_WC_RECV) {
+                req = (struct rdma_ctrl_msg *)ctx.ctrl_buf;
+                if (req->cmd == CTRL_CMD_DONE) {
+                    kvs_logInfo("[子进程] 收到 DONE 命令，所有引擎同步完成\n");
+                }
+            }
+        }
     }
 
     /*
@@ -1147,7 +1339,7 @@ int rdma_sync_client_connect(const char *master_host,
     rdma_ack_cm_event(event);
 
     /* 解析路由 */
-    kvs_logInfo("正在解析 RDMA 路由...\n");
+    kvs_logInfo("正在解析 RDMA 路由 (超时: 2秒)...\n");
     if (rdma_resolve_route(cm_id, 2000)) {
         kvs_logError("rdma_resolve_route 失败: %s (errno=%d)\n", strerror(errno), errno);
         kvs_logError("可能原因:\n");
@@ -1157,16 +1349,29 @@ int rdma_sync_client_connect(const char *master_host,
         goto err_id;
     }
 
+    kvs_logInfo("等待路由解析事件...\n");
     if (rdma_get_cm_event(g_client_ctx->cm_channel, &event)) {
         kvs_logError("rdma_get_cm_event (route) 失败: %s\n", strerror(errno));
         goto err_id;
     }
 
     if (event->event != RDMA_CM_EVENT_ROUTE_RESOLVED) {
-        kvs_logError("路由解析失败\n");
+        kvs_logError("路由解析失败，事件类型: %d\n", event->event);
+        switch (event->event) {
+        case RDMA_CM_EVENT_ROUTE_ERROR:
+            kvs_logError("原因: 路由错误\n");
+            break;
+        case RDMA_CM_EVENT_UNREACHABLE:
+            kvs_logError("原因: 目标不可达\n");
+            break;
+        default:
+            kvs_logError("原因: 未知事件\n");
+            break;
+        }
         rdma_ack_cm_event(event);
         goto err_id;
     }
+    kvs_logInfo("路由解析成功\n");
     rdma_ack_cm_event(event);
 
     /* 创建连接资源（类似服务器端） */
@@ -1275,7 +1480,24 @@ int rdma_sync_client_connect(const char *master_host,
     }
 
     if (event->event != RDMA_CM_EVENT_ESTABLISHED) {
-        kvs_logError("连接建立失败\n");
+        kvs_logError("连接建立失败，事件类型: %d\n", event->event);
+        switch (event->event) {
+        case RDMA_CM_EVENT_ROUTE_ERROR:
+            kvs_logError("原因: 路由错误 (ROUTE_ERROR)\n");
+            break;
+        case RDMA_CM_EVENT_UNREACHABLE:
+            kvs_logError("原因: 目标不可达 (UNREACHABLE)\n");
+            break;
+        case RDMA_CM_EVENT_REJECTED:
+            kvs_logError("原因: 连接被拒绝 (REJECTED)\n");
+            break;
+        case RDMA_CM_EVENT_CONNECT_ERROR:
+            kvs_logError("原因: 连接错误 (CONNECT_ERROR)\n");
+            break;
+        default:
+            kvs_logError("原因: 未知事件 %d\n", event->event);
+            break;
+        }
         rdma_ack_cm_event(event);
         goto err_mr_ctrl;
     }
