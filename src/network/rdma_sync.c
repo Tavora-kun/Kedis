@@ -843,11 +843,15 @@ int rdma_sync_child_server(int tcp_fd, rdma_engine_type_t engine_type) {
             }
         };
         struct ibv_recv_wr *bad_recv_wr;
+        kvs_logInfo("[子进程] 正在投递接收请求, qp=%p, buf=%p, lkey=%u\n",
+                    (void*)ctx.qp, (void*)ctx.ctrl_buf, ctx.mr_ctrl->lkey);
         if (ibv_post_recv(ctx.qp, &recv_wr, &bad_recv_wr)) {
-            kvs_logError("[子进程] 投递 PREPARE 接收请求失败\n");
+            kvs_logError("[子进程] 投递 PREPARE 接收请求失败: %s\n", strerror(errno));
             goto err_conn;
         }
+        kvs_logInfo("[子进程] 接收请求投递成功, wr_id=1\n");
 
+        kvs_logInfo("[子进程] 开始轮询 CQ 等待 PREPARE...\n");
         do {
             ret = ibv_poll_cq(ctx.cq, 1, &wc);
         } while (ret == 0);
@@ -1464,7 +1468,10 @@ int rdma_sync_client_connect(const char *master_host,
         goto err_qp;
     }
 
-    /* 8. 注册 MR */
+    /* 8. 注册 MR
+     * 发送缓冲区: 需要本地访问权限
+     * 接收缓冲区: 需要 LOCAL_WRITE 权限以便网卡写入
+     */
     g_client_ctx->mr_ctrl_send = ibv_reg_mr(g_client_ctx->pd,
                                             g_client_ctx->ctrl_send_buf,
                                             sizeof(struct rdma_ctrl_msg),
@@ -1638,10 +1645,13 @@ int rdma_sync_send_ctrl_msg(struct rdma_client_context *ctx,
 
     /* 发送 */
     struct ibv_send_wr *bad_wr;
+    kvs_logInfo("[客户端] ibv_post_send: qp=%p, buf=%p, lkey=%u, len=%zu\n",
+                (void*)ctx->qp, (void*)ctx->ctrl_send_buf, ctx->mr_ctrl_send->lkey, sizeof(struct rdma_ctrl_msg));
     if (ibv_post_send(ctx->qp, &wr, &bad_wr)) {
-        kvs_logError("ibv_post_send 失败\n");
+        kvs_logError("ibv_post_send 失败: %s\n", strerror(errno));
         return -1;
     }
+    kvs_logInfo("[客户端] ibv_post_send 成功, 开始轮询 CQ...\n");
 
     /* 等待发送完成 */
     struct ibv_wc wc;
@@ -1651,9 +1661,12 @@ int rdma_sync_send_ctrl_msg(struct rdma_client_context *ctx,
     } while (ret == 0);
 
     if (ret < 0 || wc.status != IBV_WC_SUCCESS) {
-        kvs_logError("发送完成失败, status=%d\n", wc.status);
+        kvs_logError("发送完成失败, status=%d (opcode=%d, wr_id=%lu)\n",
+                     wc.status, wc.opcode, (unsigned long)wc.wr_id);
+        kvs_logError("  可能原因: 对端接收队列空 / 连接断开 / QP错误\n");
         return -1;
     }
+    kvs_logInfo("[客户端] 发送完成成功\n");
 
     return 0;
 }
