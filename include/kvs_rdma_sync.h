@@ -20,9 +20,9 @@
 /* RDMA 端口偏移量 */
 #define RDMA_PORT_OFFSET    10000
 
-/* 默认 RDMA 缓冲区大小：32MB（减小以避免内存分配失败）
+/* 默认 RDMA 缓冲区大小：8MB（SoftRoCE 限制严格，需要较小缓冲区）
  * 如果数据大于此大小，使用分段传输 */
-#define RDMA_BUFFER_SIZE    (32 * 1024 * 1024)
+#define RDMA_BUFFER_SIZE    (8 * 1024 * 1024)
 
 /* 最大的 scatter-gather 元素数量 */
 #define RDMA_MAX_SGE        1

@@ -701,7 +701,7 @@ int rdma_sync_child_server(int tcp_fd, rdma_engine_type_t engine_type) {
      */
     struct rdma_event_channel *cm_channel = rdma_create_event_channel();
     if (!cm_channel) {
-        kvs_logError("[子进程] 创建RDMA事件通道失败\n");
+        kvs_logError("[子进程] 创建RDMA事件通道失败: %s (errno=%d)\n", strerror(errno), errno);
         child_send_tcp_response(tcp_fd, "ERR", 0);
         exit(1);
     }
