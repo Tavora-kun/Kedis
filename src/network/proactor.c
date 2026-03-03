@@ -33,6 +33,16 @@ struct conn_pool {
 static struct conn_pool g_conn_pool;  // 全局连接池
 static struct io_uring g_ring;        // 全局 io_uring 实例
 static msg_handler g_kvs_handler;     // KV 协议处理器
+static int g_listenfd = -1;           // 监听 fd
+
+/* eventfd 相关 */
+static int g_event_fd = -1;           // eventfd（用于 RDMA 完成通知）
+static struct conn *g_event_conn = NULL;  // eventfd 对应的 conn 结构
+static uint64_t g_event_buf;          // eventfd 读取缓冲区
+
+/* 从节点同步管理 */
+extern int slave_sync_get_eventfd(void);
+extern void slave_sync_drain_backlog(msg_handler handler);
 
 /* ---------------- 外部函数声明 ---------------- */
 extern void before_sleep(void);
@@ -124,6 +134,18 @@ static void post_send_resp(struct io_uring* ring, struct conn* c) {
   io_uring_prep_send(sqe, c->fd, c->wbuf, c->wlen, 0);
 }
 
+/* ---------------- 提交异步 read：用于 eventfd ---------------- */
+static void post_read_eventfd(struct io_uring* ring, int fd, void* buf) {
+  struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
+  if (!sqe) {
+    kvs_logError("get_sqe failed for eventfd");
+    return;
+  }
+  io_uring_prep_read(sqe, fd, buf, 8, 0);
+  /* 使用特殊标记识别 eventfd */
+  io_uring_sqe_set_data(sqe, g_event_conn);
+}
+
 /* ---------------- 释放连接资源 ---------------- */
 static void conn_free(struct conn* c) {
   if (c->fd >= 0) {
@@ -200,6 +222,7 @@ int proactor_start(unsigned short port, msg_handler handler) {
   }
 
   g_kvs_handler = handler;
+  g_listenfd = listenfd;
   signal(SIGPIPE, SIG_IGN);
 
   /* 初始化连接池 */
@@ -208,6 +231,24 @@ int proactor_start(unsigned short port, msg_handler handler) {
   /* 初始化 io_uring */
   io_uring_queue_init(RING_ENTRIES, &g_ring, 0);
   post_accept(&g_ring, listenfd);
+
+  /* 初始化从节点同步系统（如果是从节点） */
+  if (g_config.replica_mode == REPLICA_MODE_SLAVE) {
+    extern int slave_sync_init(void);
+    g_event_fd = slave_sync_init();
+    if (g_event_fd >= 0) {
+      /* 创建 eventfd 对应的 conn 结构 */
+      g_event_conn = kvs_calloc(1, sizeof(struct conn));
+      if (g_event_conn) {
+        g_event_conn->fd = g_event_fd;
+        g_event_conn->state = ST_RECV;
+        g_event_conn->rlen = 0;
+        /* 注册 eventfd 到 io_uring */
+        post_read_eventfd(&g_ring, g_event_fd, &g_event_buf);
+        kvs_logInfo("Proactor: eventfd=%d 已注册到 io_uring", g_event_fd);
+      }
+    }
+  }
 
   kvs_logInfo("Proactor server listening on port %d...", port);
 
@@ -245,6 +286,21 @@ int proactor_start(unsigned short port, msg_handler handler) {
       } else {
         if (res != -EAGAIN && res != -EINTR) perror("accept");
         post_accept(&g_ring, listenfd);
+      }
+      continue;
+    }
+
+    /* -------- eventfd 事件（RDMA 完成通知） -------- */
+    if (g_event_conn && c == g_event_conn) {
+      if (res > 0) {
+        /* RDMA 同步完成，处理积压队列 */
+        kvs_logInfo("[Proactor] 收到 RDMA 完成通知");
+        extern void slave_sync_drain_backlog(msg_handler handler);
+        slave_sync_drain_backlog(g_kvs_handler);
+        /* 重新投递 read 请求（支持多次同步） */
+        post_read_eventfd(&g_ring, g_event_fd, &g_event_buf);
+      } else if (res < 0 && res != -EAGAIN && res != -EINTR) {
+        kvs_logError("[Proactor] eventfd 错误: %d", res);
       }
       continue;
     }

@@ -7,6 +7,7 @@ SRCS = src/core/kvstore.c \
        src/core/protocol.c \
        src/core/config.c \
        src/core/sync_command.c \
+       src/core/slave_sync.c \
        src/network/ntyco.c \
        src/network/proactor.c \
        src/network/rdma_sync.c \

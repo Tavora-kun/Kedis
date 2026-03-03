@@ -297,10 +297,26 @@ static void add_reply_exist(struct conn* c, int exists) {
 
 /* ---------------- 核心命令执行逻辑 ---------------- */
 int kvs_protocol(struct conn* c) {
-    
+
     char* cmd_name = c->argv[0].ptr;
     robj* key = &c->argv[1];
     robj* value = &c->argv[2];
+
+    /* 【从节点】检查是否处于存量同步中 */
+    if (g_config.replica_mode == REPLICA_MODE_SLAVE) {
+        extern int slave_sync_get_state(void);
+        extern int slave_sync_enqueue(int argc, robj *argv);
+
+        if (slave_sync_get_state() == SLAVE_STATE_SYNCING) {
+            /* 存量同步中，命令入队 */
+            if (slave_sync_enqueue(c->argc, c->argv) == 0) {
+                add_reply_status(c, "QUEUED");
+            } else {
+                add_reply_error(c, "Sync queue full");
+            }
+            return 0;
+        }
+    }
 
     // 查找命令 ID
     int cmd = KVS_CMD_START;

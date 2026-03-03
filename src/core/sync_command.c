@@ -47,9 +47,11 @@ static void* slave_sync_worker(void *arg) {
  * 启动从节点的存量同步流程
  * 在配置加载后或收到 REPLICAOF 命令时调用
  *
- * 【方案C修改】使用TCP-first连接方式
- * 原流程: 直接连接RDMA端口 -> 同步
- * 新流程: TCP连接 -> 发送RDMASYNC -> fork触发 -> RDMA连接 -> 同步
+ * 【新架构】多线程 RDMA 同步
+ * - 主线程继续运行 io_uring，处理网络 I/O
+ * - 创建 RDMA 线程执行存量同步（阻塞）
+ * - 存量同步期间，mirror 命令入积压队列
+ * - RDMA 完成后通过 eventfd 通知主线程处理积压
  */
 int start_slave_sync(void) {
     if (g_config.master_host[0] == '\0') {
@@ -57,39 +59,27 @@ int start_slave_sync(void) {
         return -1;
     }
 
-    /* 【方案C】初始化 RDMA 客户端 */
+    /* 【新架构】初始化 RDMA 客户端 */
     if (rdma_sync_client_init() < 0) {
         kvs_logError("[SYNC] RDMA 客户端初始化失败\n");
         return -1;
     }
 
     /*
-     * 【方案C变更】使用TCP-first连接方式
+     * 【新架构】启动 RDMA 同步线程
      *
-     * 原代码:
-     *   uint16_t rdma_port = g_config.master_port + RDMA_PORT_OFFSET;
-     *   if (rdma_sync_client_connect(g_config.master_host, rdma_port) < 0)
-     *
-     * 新代码:
-     *   调用rdma_sync_client_start_via_tcp()封装完整流程:
-     *   1. TCP连接到主节点
-     *   2. 发送RDMASYNC命令触发fork
-     *   3. 接收+RDMA_READY获取动态RDMA端口
-     *   4. 建立RDMA连接
-     *   5. 执行存量同步
-     *   6. 接收+RDMA_DONE，关闭TCP连接
-     *
-     * 注意: 此函数是阻塞的，需要在后台线程中调用
+     * 主线程返回，继续处理 io_uring 事件
+     * RDMA 线程在后台执行存量同步
      */
-    if (rdma_sync_client_start_via_tcp(g_config.master_host,
-                                        g_config.master_port,
-                                        ENGINE_COUNT) < 0) {
-        kvs_logError("[SYNC] TCP触发的RDMA同步失败\n");
+    extern int slave_sync_start(const char *master_host, uint16_t master_port);
+    if (slave_sync_start(g_config.master_host, g_config.master_port) < 0) {
+        kvs_logError("[SYNC] RDMA 同步线程启动失败\n");
         return -1;
     }
 
-    kvs_logInfo("[SYNC] 存量同步成功完成，主节点: %s:%d\n",
+    kvs_logInfo("[SYNC] RDMA 同步线程已启动，主节点: %s:%d\n",
                 g_config.master_host, g_config.master_port);
+    kvs_logInfo("[SYNC] 存量同步期间收到的命令将入队，同步完成后自动执行\n");
 
     /*
      * 【方案C说明】同步流程已完成

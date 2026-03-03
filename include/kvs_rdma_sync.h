@@ -513,4 +513,67 @@ int kvs_cmd_replicaof(struct conn *c, int argc, robj *argv);  // robj 定义在 
  */
 int rdma_sync_in_progress(void);
 
+/* ============================================================================
+ * 从节点积压队列管理（多线程 RDMA 同步架构）
+ * ============================================================================
+ *
+ * 架构说明：
+ *   - 主线程（io_uring）：处理网络 I/O，收到 mirror 命令时入队
+ *   - RDMA 线程：执行存量同步，完成后通知主线程
+ *   - 积压队列：链表实现，仅主线程访问，无锁设计
+ *
+ * 状态转换：
+ *   IDLE -> SYNCING（启动 RDMA 线程）-> READY（同步完成）
+ */
+
+/* 从节点同步状态 */
+#define SLAVE_STATE_IDLE     0   /* 空闲 */
+#define SLAVE_STATE_SYNCING  1   /* 存量同步中 */
+#define SLAVE_STATE_READY    2   /* 同步完成 */
+
+/* 积压命令节点 */
+struct backlog_cmd {
+    int argc;
+    robj *argv;              /* 深拷贝的参数数组 */
+    struct backlog_cmd *next;
+};
+
+/* RDMA 线程参数 */
+struct sync_thread_args {
+    char *master_host;
+    uint16_t master_port;
+};
+
+/* 初始化从节点同步系统，返回 eventfd（供 proactor 注册）
+ * 失败返回 -1
+ */
+int slave_sync_init(void);
+
+/* 清理资源 */
+void slave_sync_cleanup(void);
+
+/* 获取 eventfd */
+int slave_sync_get_eventfd(void);
+
+/* 获取当前同步状态 */
+int slave_sync_get_state(void);
+
+/* 启动存量同步（创建 RDMA 线程）
+ * 成功返回 0，失败返回 -1
+ */
+int slave_sync_start(const char *master_host, uint16_t master_port);
+
+/* 命令入队 - 主线程在 SYNCING 状态下调用
+ * 深拷贝 argc/argv
+ */
+int slave_sync_enqueue(int argc, robj *argv);
+
+/* 处理积压队列 - 主线程在 RDMA 完成后调用
+ * handler: 命令处理函数（如 kvs_protocol）
+ */
+void slave_sync_drain_backlog(msg_handler handler);
+
+/* 清空积压队列（不执行命令） */
+void slave_sync_clear_backlog(void);
+
 #endif /* KVS_RDMA_SYNC_H */
