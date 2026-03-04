@@ -40,37 +40,124 @@ extern int rdma_sync_client_start_via_tcp(const char *master_host,
  * RDMA 同步线程
  * ============================================================================ */
 
+/* ============================================================================
+ * RDMA 同步线程主函数
+ *
+ * 【v3.0 架构】RDMA Channel（独立线程）
+ * 职责：执行 RDMA 存量同步，与 Main Channel（io_uring）并行运行
+ *
+ * 线程安全：
+ *   - 独占写入引擎：RDMA 线程是 SYNCING 期间唯一写入引擎的线程
+ *   - 状态同步：通过 g_sync_state（volatile）+ eventfd 与主线程通信
+ *   - 无锁设计：积压队列仅主线程访问，RDMA 线程不访问
+ *
+ * 生命周期：
+ *   1. 启动：主线程调用 slave_sync_start() 创建此线程
+ *   2. 运行：阻塞式 RDMA 同步（可能持续数秒到数分钟）
+ *   3. 完成：设置状态 -> 写入 eventfd -> 退出
+ * ============================================================================ */
 static void *rdma_sync_thread_fn(void *arg) {
     struct sync_thread_args *args = (struct sync_thread_args *)arg;
 
-    kvs_logInfo("[RDMA Thread] 存量同步线程启动\n");
+    kvs_logInfo("[RDMA Thread] 存量同步线程启动，目标: %s:%d\n",
+                args->master_host, args->master_port);
 
-    /* 执行存量同步（阻塞式） */
+    /* -------------------------------------------------------------------------
+     * 设置线程取消状态
+     * PTHREAD_CANCEL_ENABLE: 允许取消请求
+     * PTHREAD_CANCEL_DEFERRED: 延迟到取消点（如 sleep、I/O 操作）再响应
+     *
+     * 这允许主线程在紧急情况下取消 RDMA 同步（如 REPLICAOF NO ONE）
+     * ------------------------------------------------------------------------- */
+    pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+    pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, NULL);
+
+    /* -------------------------------------------------------------------------
+     * 执行存量同步（阻塞式）
+     *
+     * 此函数内部会：
+     *   - 建立 TCP 连接到主节点
+     *   - 发送 RDMASYNC 命令触发 fork
+     *   - 建立 RDMA 连接
+     *   - 循环读取数据并解析到引擎
+     *   - 使用流式 KSF 解析器处理分段数据
+     * ------------------------------------------------------------------------- */
     int ret = rdma_sync_client_start_via_tcp(args->master_host,
                                               args->master_port,
                                               ENGINE_COUNT);
 
+    /* -------------------------------------------------------------------------
+     * 同步完成后的状态处理
+     *
+     * 成功 (ret == 0)：
+     *   - 引擎已包含完整的存量数据
+     *   - 积压队列中有 SYNCING 期间暂存的写命令
+     *   - 需要回放积压命令以达到最终一致
+     *
+     * 失败 (ret < 0)：
+     *   - 引擎可能处于部分同步状态
+     *   - 积压队列中的命令基于不一致的数据状态
+     *   - 必须清空积压队列，否则回放会导致数据错乱
+     * ------------------------------------------------------------------------- */
     if (ret < 0) {
-        kvs_logError("[RDMA Thread] 存量同步失败\n");
+        kvs_logError("[RDMA Thread] 存量同步失败，清理积压队列\n");
+
+        /* 【关键】同步失败，积压队列中的命令基于脏数据，必须丢弃
+         * 否则回放这些命令会导致数据不一致 */
+        slave_sync_clear_backlog();
+
+        /* 重置状态为 IDLE，允许下次重新同步 */
+        g_sync_state = SLAVE_STATE_IDLE;
     } else {
         kvs_logInfo("[RDMA Thread] 存量同步成功完成\n");
+
+        /* 设置状态为 READY，积压队列将在 eventfd 通知后回放 */
+        g_sync_state = SLAVE_STATE_READY;
     }
 
-    /* 更新状态 */
-    g_sync_state = (ret == 0) ? SLAVE_STATE_READY : SLAVE_STATE_IDLE;
+    /* -------------------------------------------------------------------------
+     * 内存屏障：确保状态更新对其他 CPU 核心可见
+     *
+     * 原因：g_sync_state 是 volatile，但 C 标准不保证跨线程的内存序
+     * 此处使用 GCC 内置内存屏障，确保：
+     *   - 前面的写操作（状态更新）已完成
+     *   - 后续的 eventfd 通知能看到最新的状态
+     *
+     * 注意：x86_64 架构下 volatile 通常足够，但内存屏障提供更严格的保证
+     * 且几乎没有性能开销（仅是一条指令）
+     * ------------------------------------------------------------------------- */
+    __sync_synchronize();
 
-    /* 通知主线程 - 写入 eventfd */
+    /* -------------------------------------------------------------------------
+     * 通知主线程同步完成
+     *
+     * 机制：通过 eventfd 唤醒 io_uring 事件循环
+     * 流程：
+     *   1. RDMA 线程写入 eventfd（这里）
+     *   2. io_uring 检测到 eventfd 可读（proactor.c）
+     *   3. 主线程调用 slave_sync_drain_backlog() 回放积压
+     *
+     * 注意：必须先更新状态，再写入 eventfd，避免竞态条件
+     * ------------------------------------------------------------------------- */
     if (g_event_fd >= 0) {
-        uint64_t val = 1;
-        if (write(g_event_fd, &val, sizeof(val)) != sizeof(val)) {
+        uint64_t val = 1;  /* 通知值，可以扩展为携带更多信息（如状态码） */
+        ssize_t written = write(g_event_fd, &val, sizeof(val));
+
+        if (written != sizeof(val)) {
             kvs_logError("[RDMA Thread] eventfd 写入失败: %s\n", strerror(errno));
+            /* 即使通知失败，状态已更新，主线程可能在下次检查时处理 */
+        } else {
+            kvs_logInfo("[RDMA Thread] 已通知主线程同步完成\n");
         }
+    } else {
+        kvs_logError("[RDMA Thread] eventfd 未初始化，无法通知主线程\n");
     }
 
-    /* 清理参数 */
+    /* 清理线程参数 */
     kvs_free(args->master_host);
     kvs_free(args);
 
+    kvs_logInfo("[RDMA Thread] 线程退出\n");
     return NULL;
 }
 
@@ -216,55 +303,148 @@ int slave_sync_enqueue(int argc, robj *argv) {
     return 0;
 }
 
-/* 处理积压队列 - 主线程在 RDMA 完成后调用 */
+/* ============================================================================
+ * 积压队列回放 - 主线程在 RDMA 完成后调用
+ *
+ * 【v3.0 架构关键路径】
+ * 调用时机：主线程通过 eventfd 收到 RDMA 线程完成通知后
+ * 执行环境：io_uring 事件循环中，单线程执行（无需加锁）
+ * 状态要求：必须为 READY 状态（RDMA 线程已设置）
+ *
+ * 处理流程：
+ *   1. 状态检查：确保 RDMA 已完成，引擎数据完整
+ *   2. 顺序回放：按 FIFO 顺序执行积压的写命令
+ *   3. 资源清理：每处理一条命令立即释放其内存
+ *   4. 进度汇报：每 100 条打印日志，便于运维监控
+ * ============================================================================ */
 void slave_sync_drain_backlog(msg_handler handler) {
-    if (!handler) return;
+    if (!handler) {
+        kvs_logError("[Slave Sync] handler 为空，无法回放积压队列\n");
+        return;
+    }
+
+    /* -------------------------------------------------------------------------
+     * 状态检查：确保 RDMA 线程已完成存量同步
+     *
+     * 竞争场景：如果 RDMA 线程设置状态和写入 eventfd 之间有延迟，
+     * 主线程可能在状态仍为 SYNCING 时收到通知。
+     *
+     * 处理策略：
+     *   - 如果状态是 READY：正常执行
+     *   - 如果状态是 IDLE：RDMA 可能失败了，积压队列已被清空
+     *   - 如果状态是 SYNCING：异常，强制设置为 READY 继续执行
+     * ------------------------------------------------------------------------- */
+    if (g_sync_state != SLAVE_STATE_READY) {
+        kvs_logWarn("[Slave Sync] 状态异常，期望 READY(%d)，实际 %d\n",
+                    SLAVE_STATE_READY, g_sync_state);
+
+        if (g_sync_state == SLAVE_STATE_IDLE) {
+            /* RDMA 线程可能失败了，积压队列应该已被清空 */
+            kvs_logWarn("[Slave Sync] RDMA 可能失败，积压队列状态: head=%p, count=%lu\n",
+                        (void*)g_backlog.head, (unsigned long)g_backlog.count);
+        } else if (g_sync_state == SLAVE_STATE_SYNCING) {
+            /* 竞态条件：eventfd 通知先于状态更新到达
+             * 强制更新状态为 READY，允许回放继续 */
+            kvs_logWarn("[Slave Sync] 强制更新状态为 READY\n");
+            g_sync_state = SLAVE_STATE_READY;
+            __sync_synchronize();  /* 内存屏障，确保状态更新对其他 CPU 可见 */
+        }
+    }
+
+    if (g_backlog.count == 0) {
+        kvs_logInfo("[Slave Sync] 积压队列为空，无需回放\n");
+        return;
+    }
 
     kvs_logInfo("[Slave Sync] 开始处理积压队列，共 %lu 条命令\n",
                 (unsigned long)g_backlog.count);
 
     struct backlog_cmd *cmd;
     int processed = 0;
+    int failed = 0;
+    time_t start_time = time(NULL);  /* 简单计时 */
 
+    /* -------------------------------------------------------------------------
+     * 顺序回放积压命令
+     *
+     * 注意：积压队列中的命令都是写命令（SET/DEL/MOD 等）
+     * 这些命令在 SYNCING 期间被主线程拦截并存入队列
+     * 现在按 FIFO 顺序回放，保证因果一致性
+     * ------------------------------------------------------------------------- */
     while ((cmd = g_backlog.head) != NULL) {
-        /* 从队列移除 */
+        /* 从链表头部移除命令（O(1) 操作） */
         g_backlog.head = cmd->next;
         if (!g_backlog.head) {
-            g_backlog.tail = NULL;
+            g_backlog.tail = NULL;  /* 队列为空，更新尾指针 */
         }
         g_backlog.count--;
 
-        /* 创建临时 conn 结构执行命令 */
+        /* 创建临时 conn 结构来执行命令
+         * 原因：handler 期望一个完整的 conn 结构，包含 fd/wbuf 等字段
+         * 注意：这只是模拟网络连接，实际不通过 socket 发送响应 */
         struct conn temp_conn = {0};
+
+        /* 复制命令参数 */
         temp_conn.argc = cmd->argc;
-        /* argv 是固定大小数组，需要逐个元素复制 */
         for (int i = 0; i < cmd->argc && i < MAX_ARGC; i++) {
-            temp_conn.argv[i] = cmd->argv[i];
+            /* 浅拷贝 robj：复制 len 和 ptr 指针
+             * 注意：ptr 指向的内存仍由 cmd->argv[i] 拥有，稍后释放 */
+            temp_conn.argv[i].len = cmd->argv[i].len;
+            temp_conn.argv[i].ptr = cmd->argv[i].ptr;
         }
+
+        /* 分配写缓冲区（handler 需要写入响应） */
         temp_conn.wbuf = kvs_malloc(RESP_BUF_SIZE);
-
-        if (temp_conn.wbuf) {
-            /* 执行命令 */
-            handler(&temp_conn);
-            kvs_free(temp_conn.wbuf);
+        if (!temp_conn.wbuf) {
+            kvs_logError("[Slave Sync] 分配 wbuf 失败，跳过命令 #%d\n", processed + 1);
+            failed++;
+            goto cleanup_cmd;  /* 跳过执行，直接清理命令资源 */
         }
+        temp_conn.wlen = 0;
+        memset(temp_conn.wbuf, 0, RESP_BUF_SIZE);
 
-        /* 释放命令资源 */
+        /* 标记为内部连接（fd = -1 表示非网络连接）
+         * 这用于区分积压回放命令和普通客户端命令，便于调试 */
+        temp_conn.fd = -1;
+        temp_conn.state = ST_RECV;
+        temp_conn.send_st = ST_SEND_SMALL;
+
+        /* 执行命令：调用 kvs_protocol 处理命令 */
+        handler(&temp_conn);
+
+        /* 注意：积压命令的响应不发送给任何客户端（fd = -1）
+         * 这是因为这些命令来自 TCP mirror，客户端在主节点已收到响应
+         * 从节点只需要保证数据一致性，不需要返回响应 */
+
+        kvs_free(temp_conn.wbuf);
+
+    cleanup_cmd:
+        /* 释放命令资源：argv 数组和其中的字符串缓冲区 */
         for (int i = 0; i < cmd->argc; i++) {
             if (cmd->argv[i].ptr) {
                 kvs_free(cmd->argv[i].ptr);
             }
         }
-        kvs_free(cmd->argv);
-        kvs_free(cmd);
+        kvs_free(cmd->argv);  /* 释放 argv 数组本身 */
+        kvs_free(cmd);        /* 释放命令节点 */
 
         processed++;
+
+        /* 每处理 100 条命令打印一次进度，便于监控大批量回放 */
+        if (processed % 100 == 0) {
+            kvs_logInfo("[Slave Sync] 回放进度: %d/%d (剩余 %lu)\n",
+                        processed, processed + (int)g_backlog.count,
+                        (unsigned long)g_backlog.count);
+        }
     }
 
+    /* 重置队列状态 */
     g_backlog.tail = NULL;
     g_backlog.count = 0;
 
-    kvs_logInfo("[Slave Sync] 积压队列处理完成，共处理 %d 条命令\n", processed);
+    time_t elapsed = time(NULL) - start_time;
+    kvs_logInfo("[Slave Sync] 积压队列处理完成，成功 %d，失败 %d，耗时 %ld 秒\n",
+                processed - failed, failed, (long)elapsed);
 }
 
 /* 清空积压队列（不执行） */

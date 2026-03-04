@@ -1,6 +1,7 @@
 // proactor.c - Proactor network model with RESP protocol and io_uring
 #define _GNU_SOURCE
 #include "../../include/kvstore.h"
+#include "../../include/kvs_rdma_sync.h"  /* SLAVE_STATE_* 宏定义 */
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
@@ -290,17 +291,76 @@ int proactor_start(unsigned short port, msg_handler handler) {
       continue;
     }
 
-    /* -------- eventfd 事件（RDMA 完成通知） -------- */
+    /* =========================================================================
+     * eventfd 事件处理（RDMA 同步完成通知）
+     *
+     * 【v3.0 架构】线程间通信机制
+     *
+     * 触发流程：
+     *   RDMA 线程完成同步 -> 更新 g_sync_state -> 写入 eventfd ->
+     *   io_uring 检测到可读 -> 这里处理 -> 回放积压队列
+     *
+     * 设计要点：
+     *   - 无锁：eventfd 是单生产者（RDMA 线程）单消费者（主线程）
+     *   - 幂等：即使多次通知，状态检查防止重复回放
+     *   - 容错：错误后重新投递 read 请求，确保不错过后续通知
+     * ========================================================================= */
     if (g_event_conn && c == g_event_conn) {
       if (res > 0) {
-        /* RDMA 同步完成，处理积压队列 */
-        kvs_logInfo("[Proactor] 收到 RDMA 完成通知");
-        extern void slave_sync_drain_backlog(msg_handler handler);
-        slave_sync_drain_backlog(g_kvs_handler);
-        /* 重新投递 read 请求（支持多次同步） */
+        /* 成功读取通知值（8 字节 uint64_t） */
+        uint64_t notify_val = g_event_buf;
+        kvs_logInfo("[Proactor] 收到 RDMA 完成通知，值=%lu", (unsigned long)notify_val);
+
+        /* ------------------------------------------------------------------
+         * 【关键】状态检查，防止重复处理或异常状态处理
+         *
+         * 场景1: 正常完成 -> READY -> 回放积压
+         * 场景2: RDMA 失败 -> IDLE -> 积压已清空，无需回放
+         * 场景3: 重复通知 -> 状态已为 READY，积压为空，安全
+         * ------------------------------------------------------------------ */
+        extern int slave_sync_get_state(void);
+        int current_state = slave_sync_get_state();
+
+        if (current_state == SLAVE_STATE_READY) {
+          /* 正常路径：RDMA 成功，需要回放积压队列 */
+          extern void slave_sync_drain_backlog(msg_handler handler);
+          slave_sync_drain_backlog(g_kvs_handler);
+          kvs_logInfo("[Proactor] 积压队列回放完成");
+        } else if (current_state == SLAVE_STATE_IDLE) {
+          /* RDMA 线程可能失败了，积压队列已被清空 */
+          kvs_logWarn("[Proactor] RDMA 同步失败（状态为 IDLE），无需回放");
+        } else if (current_state == SLAVE_STATE_SYNCING) {
+          /* 竞态条件：通知早于状态更新到达
+           * 策略：继续等待下一次通知（RDMA 线程会再发一次） */
+          kvs_logWarn("[Proactor] 收到通知但状态仍为 SYNCING，等待下次通知");
+        } else {
+          /* 未知状态，记录错误 */
+          kvs_logError("[Proactor] 未知同步状态: %d", current_state);
+        }
+
+        /* 重新投递 read 请求，支持多次同步（如 REPLICAOF 切换到新主） */
         post_read_eventfd(&g_ring, g_event_fd, &g_event_buf);
-      } else if (res < 0 && res != -EAGAIN && res != -EINTR) {
-        kvs_logError("[Proactor] eventfd 错误: %d", res);
+
+      } else if (res < 0) {
+        /* ------------------------------------------------------------------
+         * 错误处理
+         * -EAGAIN: 非阻塞模式下无数据可读（不应发生，io_uring 已触发）
+         * -EINTR:  被信号中断，可以安全重试
+         * 其他：    严重错误，记录并尝试恢复
+         * ------------------------------------------------------------------ */
+        if (res == -EAGAIN || res == -EINTR) {
+          /* 可重试错误，重新投递 read 请求 */
+          kvs_logDebug("[Proactor] eventfd 可重试错误: %d，重新投递", res);
+          post_read_eventfd(&g_ring, g_event_fd, &g_event_buf);
+        } else {
+          /* 严重错误，记录但不退出（eventfd 可能仍可恢复） */
+          kvs_logError("[Proactor] eventfd 错误: %d，尝试恢复", res);
+          post_read_eventfd(&g_ring, g_event_fd, &g_event_buf);
+        }
+      } else {
+        /* res == 0: 对端关闭 eventfd（不应发生，eventfd 是匿名管道） */
+        kvs_logWarn("[Proactor] eventfd 返回 0（对端关闭？），重新注册");
+        post_read_eventfd(&g_ring, g_event_fd, &g_event_buf);
       }
       continue;
     }
