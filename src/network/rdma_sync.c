@@ -1893,7 +1893,7 @@ int rdma_sync_poll_completion(struct rdma_client_context *ctx,
 /* ============================================================================
  * TCP 队列处理
  * ============================================================================ */
-
+#if 0
 /*
  * 从 RESP 协议数据中提取整数（用于解析 *<argc> 和 $<len>）
  * @param p 指向数字开始位置的指针
@@ -1935,6 +1935,9 @@ static const char* parse_resp_integer(const char *p, const char *end, int *out_v
  * @param len 数据长度
  * @return 0成功，-1失败
  */
+
+
+ 
 static int rdma_sync_execute_cmd(const char *data, size_t len) {
     const char *p = data;
     const char *end = data + len;
@@ -2121,6 +2124,8 @@ cleanup:
 
     return (ret == 0) ? 0 : -1;
 }
+
+#endif
 
 void rdma_sync_enqueue_tcp_cmd(const char *data, size_t len) {
     if (!g_client_ctx) {

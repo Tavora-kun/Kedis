@@ -113,6 +113,7 @@ static void *rdma_sync_thread_fn(void *arg) {
 
         /* 设置状态为 READY，积压队列将在 eventfd 通知后回放 */
         g_sync_state = SLAVE_STATE_READY;
+        kvs_logInfo("[RDMA Thread] 状态设置为 READY");
     }
 
     /* -------------------------------------------------------------------------
@@ -230,6 +231,7 @@ int slave_sync_start(const char *master_host, uint16_t master_port) {
 
     /* 设置状态为同步中 */
     g_sync_state = SLAVE_STATE_SYNCING;
+    kvs_logInfo("[Slave Sync] 状态设置为 SYNCING");
 
     /* 创建 RDMA 线程 */
     pthread_t thread;
