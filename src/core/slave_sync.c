@@ -181,9 +181,19 @@ int slave_sync_init(void) {
     g_backlog.tail = NULL;
     g_backlog.count = 0;
 
-    g_sync_state = SLAVE_STATE_IDLE;
+    /* 【v3.0 修复】避免覆盖已有的同步状态
+     * 场景：配置文件中配置了主节点，main() 会先调用 start_slave_sync()
+     * 然后再调用 proactor_start()，后者又会调用 slave_sync_init()。
+     * 如果此时状态已经是 SYNCING，重置为 IDLE 会导致命令处理逻辑错误。
+     */
+    if (g_sync_state == SLAVE_STATE_IDLE) {
+        /* 只有初始状态为 IDLE 时才保持 IDLE，否则不覆盖 */
+        g_sync_state = SLAVE_STATE_IDLE;
+    } else {
+        kvs_logInfo("[Slave Sync] 状态已经是 %d，保持现有状态不重置\n", g_sync_state);
+    }
 
-    kvs_logInfo("[Slave Sync] 初始化完成，event_fd=%d\n", g_event_fd);
+    kvs_logInfo("[Slave Sync] 初始化完成，event_fd=%d, 当前状态=%d\n", g_event_fd, g_sync_state);
     return g_event_fd;  /* 返回 eventfd，让 proactor 注册 */
 }
 
