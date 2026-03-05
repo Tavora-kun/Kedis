@@ -48,6 +48,7 @@
 
 
 #include "memory_pool.h"
+#include "kmem.h"
 #include "kvs_log.h"
 
 enum {

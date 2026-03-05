@@ -18,7 +18,8 @@ SRCS = src/core/kvstore.c \
        src/persistence/ksf.c \
        src/persistence/ksf_stream.c \
        src/persistence/aof.c \
-       src/utils/memory_pool.c \
+       src/utils/kmem.c \
+	   src/utils/kmem_compat.c \
 	   src/utils/kvs_log.c
 
 OBJS = $(SRCS:.c=.o)
@@ -26,6 +27,11 @@ OBJS = $(SRCS:.c=.o)
 # 测试用例（独立编译）
 # TEST_SRCS = tests/testcase.c
 # TEST_OBJS = $(TEST_SRCS:.c=.o)
+
+# kmem测试
+KMEM_TEST_SRC = tests/test_kmem.c
+KMEM_TEST_OBJ = tests/test_kmem.o
+KMEM_TEST = tests/test_kmem
 
 TARGET = kvstore
 # TESTCASE = tests/testcase
@@ -53,6 +59,18 @@ $(TARGET): $(OBJS)
 # $(TESTCASE): $(TEST_OBJS)
 # 	$(CC) -o $@ $^
 
+# kmem测试程序
+$(KMEM_TEST_OBJ): $(KMEM_TEST_SRC)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(KMEM_TEST): $(KMEM_TEST_OBJ) src/utils/kmem.o
+	$(CC) -o $@ $^ -lpthread
+
+test-kmem: $(KMEM_TEST)
+	./$(KMEM_TEST)
+
 clean:
 	rm -f $(OBJS) $(TEST_OBJS) $(TARGET) $(TESTCASE)
+	rm -f $(KMEM_TEST_OBJ) $(KMEM_TEST)
+	rm -f src/utils/kmem.o
 	$(MAKE) -C $(SUBDIR) clean 2>/dev/null || true

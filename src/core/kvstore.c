@@ -21,9 +21,6 @@
 #include <jemalloc/jemalloc.h>
 #endif
 
-// 全局内存池实例
-static memory_pool_t* g_mem_pool = NULL;
-
 #if (NETWORK_SELECT == NETWORK_REACTOR)
 #include "src/network/reactor_server.h"    // only for reactor.c
 #endif
@@ -120,6 +117,8 @@ const char* snap_filename = "./data/dump.ksf";
 
 // 不直接使用系统调用(第三方接口)
 // 跨平台的时候，只需要修改这个函数即可--> 可迭代
+// 现在使用kmem作为底层内存分配器
+
 void* kvs_calloc(size_t num, size_t size) {
 #ifdef HAVE_JEMALLOC
     return calloc(num, size);
@@ -137,33 +136,17 @@ void* kvs_malloc(size_t size) {
 #ifdef HAVE_JEMALLOC
     return malloc(size);
 #else
-    // 如果内存池已初始化且请求大小适合内存池，则使用内存池
-    if (g_mem_pool && size <= g_mem_pool->block_size) {
-        return mem_pool_alloc(g_mem_pool);
-    }
-    // 否则使用标准malloc
-    return malloc(size);
+    // 使用kmem智能分配
+    return kmem_alloc(size);
 #endif
 }
 
 void kvs_free(void* ptr) {
-    // 检查指针是否属于内存池管理范围
 #ifdef HAVE_JEMALLOC
     free(ptr);
 #else
-    if (g_mem_pool && ptr) {
-        char* start = (char*)g_mem_pool->chunk + sizeof(mem_block_t);
-        char* end = start + g_mem_pool->max_blocks *
-                                                        (sizeof(mem_block_t) + g_mem_pool->block_size);
-        char* ptr_char = (char*)ptr;
-
-        if (ptr_char >= start && ptr_char < end) {
-            mem_pool_free(g_mem_pool, ptr);
-            return;
-        }
-    }
-    // 不在内存池范围内的指针使用标准free
-    free(ptr);
+    // 使用kmem释放
+    kmem_free(ptr);
 #endif
 }
 // 定义了头文件中 command 变量的声明
@@ -885,8 +868,11 @@ int kvs_protocol(struct conn* c) {
 }
 
 int init_kvengine(void) {
-    // 初始化内存池，针对KV存储的典型数据大小进行优化
-    g_mem_pool = mem_pool_init(MEM_BLOCK_SIZE);
+    // 初始化kmem内存池系统
+    if (kmem_init() != 0) {
+        kvs_logError("Failed to initialize kmem\n");
+        return -1;
+    }
     // fprintf(stderr, "-1-->\n");
     #if ENABLE_MULTI_ENGINE
     // 多引擎模式：初始化所有启用的引擎
@@ -941,11 +927,8 @@ void dest_kvengine(void) {
     kvs_main_destroy(&global_main_engine);
 #endif
 
-    // 释放内存池
-    if (g_mem_pool) {
-        mem_pool_destroy(g_mem_pool);
-        g_mem_pool = NULL;
-    }
+    // 销毁kmem内存池系统
+    kmem_destroy();
 
     // 清理同步模块（关闭 RDMA 连接、释放资源）
     sync_module_cleanup();
