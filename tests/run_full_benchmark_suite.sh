@@ -184,8 +184,8 @@ print_progress() {
     local empty=$((bar_length - filled))
 
     printf "\r["
-    printf "%${filled}s" | tr ' ' '█'
-    printf "%${empty}s" | tr ' ' '░'
+    printf "%${filled}s" | tr ' ' 'x'
+    printf "%${empty}s" | tr ' ' '-'
     printf "] %3d%% (%d/%d) %s" "$percent" "$current" "$total" "$label"
 }
 
