@@ -127,30 +127,54 @@ def create_comparison_chart(kmem_file, je_file, output_dir='.'):
     plt.close()
     print(f"[+] 已保存: {output_path}")
     
-    # 图 2: 细节放大图（显示 SET 阶段）
+    # 图 2: SET 阶段细节对比图（双 Y 轴，避免 kmem 被 jemalloc 淹没）
     print("[*] 生成细节图...")
-    fig, ax = plt.subplots(figsize=(14, 7), facecolor='white')
-    ax.set_facecolor('#fafafa')
+    fig, ax1 = plt.subplots(figsize=(14, 7), facecolor='white')
+    ax1.set_facecolor('#fafafa')
     
-    # 只显示前 50% 的时间（通常是 SET 和 GET 阶段）
-    kmem_mid = len(kmem_times) // 2
-    je_mid = len(je_times) // 2
+    # 找到 SET 阶段结束的大致时间点（jemalloc 内存增长最快的阶段）
+    # 使用 jemalloc 达到峰值 90% 的时间作为 SET 阶段结束
+    je_peak_idx = je_mems.index(max(je_mems))
+    je_set_end_time = je_times[je_peak_idx] if je_times else 0
     
-    ax.plot(kmem_times[:kmem_mid], kmem_mems[:kmem_mid], 
-           label='kmem', linewidth=2, color='#2ecc71', alpha=0.9)
-    ax.plot(je_times[:je_mid], je_mems[:je_mid], 
-           label='jemalloc', linewidth=2, color='#3498db', alpha=0.9)
+    # 找到 kmem 的峰值时间点
+    kmem_peak_idx = kmem_mems.index(max(kmem_mems))
+    kmem_set_end_time = kmem_times[kmem_peak_idx] if kmem_times else 0
     
-    ax.set_xlabel('Time (seconds)', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Heap Memory (MB)', fontsize=12, fontweight='bold')
-    ax.set_title('Memory Allocator Comparison - Detail View\n'
-                '(SET & GET phases)', 
-                fontsize=14, fontweight='bold')
-    ax.legend(loc='lower right', fontsize=11)
-    ax.grid(True, alpha=0.3, linestyle='--')
-    ax.set_axisbelow(True)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
+    # 显示范围：0 到两者峰值时间的较大值（确保能看到完整的 SET 阶段）
+    set_end_time = max(je_set_end_time, kmem_set_end_time) * 1.1  # 留 10% 余量
+    
+    # 过滤数据点，只显示到 SET 阶段结束
+    kmem_set_idx = next((i for i, t in enumerate(kmem_times) if t > set_end_time), len(kmem_times))
+    je_set_idx = next((i for i, t in enumerate(je_times) if t > set_end_time), len(je_times))
+    
+    # 绘制 jemalloc（左 Y 轴）
+    ax1.plot(je_times[:je_set_idx], je_mems[:je_set_idx], 
+            label='jemalloc', linewidth=2.5, color='#3498db', alpha=0.9)
+    ax1.set_xlabel('Time (seconds)', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('jemalloc Heap Memory (MB)', fontsize=12, fontweight='bold', color='#3498db')
+    ax1.tick_params(axis='y', labelcolor='#3498db')
+    ax1.grid(True, alpha=0.3, linestyle='--')
+    ax1.set_axisbelow(True)
+    ax1.spines['top'].set_visible(False)
+    
+    # 创建右 Y 轴显示 kmem（避免被 jemalloc 的大数值淹没）
+    ax2 = ax1.twinx()
+    ax2.plot(kmem_times[:kmem_set_idx], kmem_mems[:kmem_set_idx], 
+            label='kmem', linewidth=2.5, color='#2ecc71', alpha=0.9)
+    ax2.set_ylabel('kmem Heap Memory (MB)', fontsize=12, fontweight='bold', color='#2ecc71')
+    ax2.tick_params(axis='y', labelcolor='#2ecc71')
+    ax2.spines['top'].set_visible(False)
+    
+    # 设置标题
+    plt.title('Memory Allocator Comparison - SET Phase Detail\n'
+             '(Dual Y-axis: jemalloc left, kmem right)', 
+             fontsize=14, fontweight='bold', pad=15)
+    
+    # 合并图例
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize=11)
     
     plt.tight_layout()
     output_path = os.path.join(output_dir, 'allocator_comparison_detail.png')
