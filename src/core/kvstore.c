@@ -25,55 +25,6 @@
 #include "src/network/reactor_server.h"    // only for reactor.c
 #endif
 
-// enum {
-//     KVS_CMD_START = 0,
-//     // 统一的KV操作命令（单引擎模式）
-//     KVS_CMD_SET = KVS_CMD_START,
-//     KVS_CMD_GET,
-//     KVS_CMD_DEL,
-//     KVS_CMD_MOD,
-//     KVS_CMD_EXIST,
-
-//     // 多引擎模式 - Array 引擎命令
-//     KVS_CMD_ASET,
-//     KVS_CMD_AGET,
-//     KVS_CMD_ADEL,
-//     KVS_CMD_AMOD,
-//     KVS_CMD_AEXIST,
-
-//     // 多引擎模式 - Hash 引擎命令
-//     KVS_CMD_HSET,
-//     KVS_CMD_HGET,
-//     KVS_CMD_HDEL,
-//     KVS_CMD_HMOD,
-//     KVS_CMD_HEXIST,
-
-//     // 多引擎模式 - RBTREE 引擎命令
-//     KVS_CMD_RSET,
-//     KVS_CMD_RGET,
-//     KVS_CMD_RDEL,
-//     KVS_CMD_RMOD,
-//     KVS_CMD_REXIST,
-
-//     // 多引擎模式 - Skiplist 引擎命令
-//     KVS_CMD_SSET,
-//     KVS_CMD_SGET,
-//     KVS_CMD_SDEL,
-//     KVS_CMD_SMOD,
-//     KVS_CMD_SEXIST,
-
-//     // 通用命令（两种模式都支持）
-//     KVS_CMD_SAVE,
-//     KVS_CMD_BGSAVE,
-//     KVS_CMD_SYNC,
-
-//     KVS_CMD_COUNT
-// };
-
-// // Global Lock and Context
-// pthread_mutex_t global_kvs_lock = PTHREAD_MUTEX_INITIALIZER;
-// __thread int current_processing_fd = -1;
-
 // 多引擎模式下的引擎实例定义
 #if ENABLE_MULTI_ENGINE
 #if ENABLE_RBTREE
@@ -905,7 +856,16 @@ int init_kvengine(void) {
     return 0;
 }
 
+/* 防止重复调用的静态标志 */
+static int g_dest_already_called = 0;
+
 void dest_kvengine(void) {
+    if (g_dest_already_called) {
+        kvs_logWarn("dest_kvengine 已经被调用过，跳过重复执行");
+        return;
+    }
+    g_dest_already_called = 1;
+    
 #if ENABLE_MULTI_ENGINE
     ksfSaveAll();
 // 多引擎模式：销毁所有引擎
@@ -936,9 +896,34 @@ void dest_kvengine(void) {
 
 // 信号处理函数
 void signal_handler(int sig) {
+    static volatile int g_signal_received = 0;
+    
+    // 防止重复进入
+    if (g_signal_received) {
+        return;
+    }
+    g_signal_received = 1;
+    
     printf("\n接收到信号 %d，准备关闭服务...\n", sig);
-    // 不直接调用dest_kvengine，而是正常退出，让atexit处理清理
-    exit(0);    // 正常退出，会调用atexit注册的函数
+    
+    // 【重要】设置全局退出标志，通知网络层优雅退出
+    // proactor 使用 io_uring_wait_cqe_timeout，100ms 内会检查此标志
+#if (NETWORK_SELECT == NETWORK_PROACTOR)
+    extern void proactor_stop(void);
+    proactor_stop();
+#elif (NETWORK_SELECT == NETWORK_REACTOR)
+    extern void reactor_stop(void);
+    reactor_stop();
+#elif (NETWORK_SELECT == NETWORK_NTYCO)
+    extern void ntyco_stop(void);
+    ntyco_stop();
+#endif
+    
+    // 不调用 exit()！让 proactor 自然退出，main 函数继续执行 dest_kvengine()
+    // 优点：
+    // 1. 控制流清晰：signal → stop → proactor 退出 → dest_kvengine
+    // 2. 避免 exit() 的强制终止可能导致的资源不一致
+    // 3. 便于调试，堆栈跟踪清晰
 }
 
 int main(int argc, char* argv[]) {
@@ -970,9 +955,11 @@ int main(int argc, char* argv[]) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    if (atexit(dest_kvengine) != 0) {
-        kvs_logWarn("无法注册退出函数\n");
-    }
+    // 注意：不使用 atexit，改为显式调用 dest_kvengine
+    // 优点：
+    // 1. 控制流清晰，便于调试
+    // 2. 避免 atexit 的执行顺序问题
+    // 3. 异常终止时不会执行不完整的清理
 
     init_kvengine();
 
@@ -1055,6 +1042,10 @@ if (g_config.aof_enabled) {
     ntyco_start(port, kvs_protocol);
 #endif
 
+    // 【优雅退出】proactor 正常退出后，显式执行清理
+    // 信号处理流程：SIGTERM → signal_handler → proactor_stop → proactor 超时退出 → dest_kvengine
+    // 正常流程：proactor 完成工作 → 退出循环 → dest_kvengine
     dest_kvengine();
-
+    
+    kvs_logInfo("服务已完全关闭");
 }

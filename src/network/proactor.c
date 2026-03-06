@@ -35,6 +35,7 @@ static struct conn_pool g_conn_pool;  // 全局连接池
 static struct io_uring g_ring;        // 全局 io_uring 实例
 static msg_handler g_kvs_handler;     // KV 协议处理器
 static int g_listenfd = -1;           // 监听 fd
+static volatile int g_proactor_running = 1;  // 运行标志，用于优雅退出
 
 /* eventfd 相关 */
 static int g_event_fd = -1;           // eventfd（用于 RDMA 完成通知）
@@ -47,6 +48,11 @@ extern void slave_sync_drain_backlog(msg_handler handler);
 
 /* ---------------- 外部函数声明 ---------------- */
 extern void before_sleep(void);
+
+/* ---------------- 优雅退出支持 ---------------- */
+void proactor_stop(void) {
+  g_proactor_running = 0;
+}
 // extern __thread int current_processing_fd;
 
 /* ---------------- 连接池管理 ---------------- */
@@ -269,10 +275,19 @@ int proactor_start(unsigned short port, msg_handler handler) {
 
   kvs_logInfo("Proactor server listening on port %d...", port);
 
-  while (1) {
+  while (g_proactor_running) {
     io_uring_submit(&g_ring);
     struct io_uring_cqe* cqe;
-    if (io_uring_wait_cqe(&g_ring, &cqe) < 0) break;
+    
+    // 【优雅退出】使用 100ms 超时等待，定期检查退出标志
+    struct __kernel_timespec ts = {.tv_sec = 0, .tv_nsec = 100000000};
+    int ret = io_uring_wait_cqe_timeout(&g_ring, &cqe, &ts);
+    
+    if (ret == -ETIME) {
+      // 超时，继续循环检查 g_proactor_running
+      continue;
+    }
+    if (ret < 0) break;
 
     struct conn* c = (struct conn*)io_uring_cqe_get_data(cqe);
     int res = cqe->res;
