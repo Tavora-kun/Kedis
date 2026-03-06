@@ -17,8 +17,16 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 32 * 1024 * 1024); // 用户态消费跟不上生产:256*1024 -> 8*1024*1024
+    __uint(max_entries, 256 * 1024 * 1024); // 增大到 256MB，减少丢包
 } rb SEC(".maps");
+
+// 丢包统计器
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 2);
+    __type(key, __u32);
+    __type(value, __u64);
+} drop_stats SEC(".maps");
 
 SEC("tc")
 int mirror_forward(struct __sk_buff *skb)
@@ -57,6 +65,15 @@ int mirror_forward(struct __sk_buff *skb)
 
     // 发送 Header
     struct packet_event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        // 记录 header 丢包
+        __u32 key = 1;
+        __u64 *count = bpf_map_lookup_elem(&drop_stats, &key);
+        if (count) {
+            __sync_fetch_and_add(count, 1);
+        }
+        return TC_ACT_OK;
+    }
     if (e) {
         e->type = EVENT_HEADER;
         e->src_ip = ip->saddr; e->dst_ip = ip->daddr;
@@ -85,7 +102,15 @@ int mirror_forward(struct __sk_buff *skb)
         // 而 final_len 就等于 chunk_len,就是我们要发送的数据大小
         
         struct packet_event *de = bpf_ringbuf_reserve(&rb, sizeof(*de), 0);
-        if (!de) continue;
+        if (!de) {
+            // 记录丢包统计
+            __u32 key = 0;
+            __u64 *count = bpf_map_lookup_elem(&drop_stats, &key);
+            if (count) {
+                __sync_fetch_and_add(count, 1);
+            }
+            continue;
+        }
 
         de->type = EVENT_DATA;
         de->offset = cur_offset;

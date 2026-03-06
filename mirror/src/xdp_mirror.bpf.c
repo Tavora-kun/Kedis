@@ -13,8 +13,16 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 32 * 1024 * 1024);
+    __uint(max_entries, 256 * 1024 * 1024); // 增大到 256MB，减少丢包
 } rb SEC(".maps");
+
+// 丢包统计器
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 2);
+    __type(key, __u32);
+    __type(value, __u64);
+} drop_stats SEC(".maps");
 
 SEC("xdp")
 int xdp_mirror_forward(struct xdp_md *ctx)
@@ -49,6 +57,15 @@ int xdp_mirror_forward(struct xdp_md *ctx)
 
     // 发送 Header 事件
     struct packet_event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        // 记录 header 丢包
+        __u32 key = 1;
+        __u64 *count = bpf_map_lookup_elem(&drop_stats, &key);
+        if (count) {
+            __sync_fetch_and_add(count, 1);
+        }
+        return XDP_PASS;
+    }
     if (e) {
         e->type = EVENT_HEADER;
         e->src_ip = ip->saddr;
@@ -75,7 +92,15 @@ int xdp_mirror_forward(struct xdp_md *ctx)
         __u32 final_len = ((chunk_len - 1) & 0xFFFF) + 1;
 
         struct packet_event *de = bpf_ringbuf_reserve(&rb, sizeof(*de), 0);
-        if (!de) continue;
+        if (!de) {
+            // 记录丢包统计
+            __u32 key = 0;
+            __u64 *count = bpf_map_lookup_elem(&drop_stats, &key);
+            if (count) {
+                __sync_fetch_and_add(count, 1);
+            }
+            continue;
+        }
 
         de->type = EVENT_DATA;
         de->src_ip = ip->saddr;
