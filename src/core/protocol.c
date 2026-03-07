@@ -45,19 +45,13 @@ void kvs_resp_free_resources(struct conn* c) {
 int kvs_resp_feed(struct conn* c) {
   // 读进来的数据放在
 
-  // fprintf(stderr, "--> while\n");
-  // fprintf(stderr, "--> while: resp_state: %d\n", c->resp_state);
-  // fprintf(stderr, "c->parse_done: %zu < c->rlen: %zu", c->parse_done, c->rlen);
-
   while (c->parse_done < c->rlen && c->resp_state != ST_RESP_OK) {
     switch (c->resp_state) {
       case ST_RESP_HDR: {
         kvs_logDebug("RECV: into [ST_RESP_HDR]");
         // 检查是否以 * 开头（Array 格式）
         // DEBUG
-        // fprintf(stderr, "-->hdr: rbuf: %s\n", c->rbuf);
         if (c->rbuf[c->parse_done] != '*') {
-            // fprintf(stderr, "rbuf: %*s\nparse_>done后: %*s\n", IOP_SIZE, c->rbuf, IOP_SIZE - c->parse_done, c->rbuf + c->parse_done);
             kvs_logError("The first char must be *");
           goto error;  // 协议错误：不是 Array 格式
         }
@@ -74,7 +68,6 @@ int kvs_resp_feed(struct conn* c) {
         char* endptr;
         c->argc = (int)strtol(ptr, &endptr, 10);  // 解析数字
 
-        // fprintf(stderr, "c->argc=%d\n", c->argc);
         // 检查解析是否成功（endptr 应该指向 \r）
         if (endptr != end) {
           kvs_logError("Argc convert error");
@@ -93,14 +86,10 @@ int kvs_resp_feed(struct conn* c) {
         // 检查是否以 $ 开头（Bulk String 格式）
         
         // DEBUG
-        // fprintf(stderr, "-->bulk_len\n");
-        
-        // fprintf(stderr, "c->parse_down:这个位置是:%s\n", c->rbuf[c->parse_done]);
         if (c->rbuf[c->parse_done] != '$') {
           kvs_logError("Bulk should start with $");
           goto error; // 协议错误：不是 Bulk String 格式
         }
-        // fprintf(stderr, "-->bulk_len1\n");
         
         // 查找 \r\n，确定长度头结束位置
         char* end = strstr(c->rbuf + c->parse_done, "\r\n");
@@ -116,7 +105,6 @@ int kvs_resp_feed(struct conn* c) {
           // return RESP_CONTINUE_REMAINING_RECV;
         }
         
-        // fprintf(stderr, "-->bulk_len2\n");
         // 提取 bulk_len（bulk data 长度）
         char* ptr = c->rbuf + c->parse_done + 1;  // 跳过 '$'
         char* endptr;
@@ -128,7 +116,6 @@ int kvs_resp_feed(struct conn* c) {
           goto error;
           // return -1;  // 解析错误：数字格式错误
         }
-        // fprintf(stderr, "-->bulk_len3\n");
         
         // 更新 parse_done 到长度头结束位置（跳过 \r\n）
         c->parse_done = end + 2 - c->rbuf;
