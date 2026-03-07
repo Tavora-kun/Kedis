@@ -40,6 +40,12 @@ void kvs_resp_free_resources(struct conn* c) {
   // wbuf 是由网络层分配和管理的，这里我们只负责 argv 相关的内存
 }
 
+static inline char* find_crlf(const char* s, size_t len) {
+    for (size_t i = 0; i + 1 < len; i++) 
+        if (s[i] == '\r' && s[i+1] == '\n') return (char*)(s + i);
+    return NULL;
+}
+
 /* --------------  RESP 流式解析：啃掉 data[]，返回是否完成一条完整命令
  * -------------- */
 int kvs_resp_feed(struct conn* c) {
@@ -57,7 +63,7 @@ int kvs_resp_feed(struct conn* c) {
         }
 
         // 查找 \r\n，确定命令头结束位置
-        char* end = strstr(c->rbuf + c->parse_done, "\r\n");
+        char* end = find_crlf(c->rbuf + c->parse_done, "\r\n");
         if (!end) {
           // 找不到 \r\n，数据不足，保留未解析的数据在 rbuf 中
           goto continue_recv;  // 需要更多数据
@@ -92,7 +98,7 @@ int kvs_resp_feed(struct conn* c) {
         }
         
         // 查找 \r\n，确定长度头结束位置
-        char* end = strstr(c->rbuf + c->parse_done, "\r\n");
+        char* end = find_crlf(c->rbuf + c->parse_done, "\r\n");
         if (!end) {
           // 找不到 \r\n，数据不足
           // 保留未解析的 $<len> 部分在 rbuf 中，下次继续解析
@@ -226,7 +232,6 @@ int kvs_resp_feed(struct conn* c) {
               // fprintf(stderr, "[循环内]判断出了有粘包\n");
               size_t remaining = c->rlen - c->parse_done;
               memmove(c->rbuf, c->rbuf + c->parse_done, remaining);
-              memset(c->rbuf + remaining, 0, c->rlen - remaining);
               c->rlen = remaining;
               c->parse_done = 0;
               // fprintf(stderr, "--> 不完美, 有粘包 ?? 你走这里来了?\n");
@@ -234,7 +239,6 @@ int kvs_resp_feed(struct conn* c) {
               // fprintf(stderr, "--> 完美 你走这里来了?\n");
               c->rlen = 0;
               c->parse_done = 0;
-              memset(c->rbuf, 0, IOP_SIZE);
             }
           } else {
             // 继续解析下一个参数，切换到 ST_RESP_BULK_LEN 状态
@@ -321,7 +325,6 @@ int kvs_resp_feed(struct conn* c) {
   continue_recv:
     size_t remaining = c->rlen - c->parse_done;
     memmove(c->rbuf, c->rbuf + c->parse_done, remaining);
-    memset(c->rbuf + remaining, 0, c->rlen - remaining);
     c->rlen = remaining;
     c->parse_done = 0;
     // fprintf(stderr, "留下了谁? %d bytes: %*s\n", remaining , remaining, c->rbuf);
@@ -329,7 +332,6 @@ int kvs_resp_feed(struct conn* c) {
 
   error:
     c->rlen = c->parse_done = 0;
-    memset(c->rbuf, 0, IOP_SIZE);
     c->resp_state = ST_RESP_HDR;
     return RESP_ERROR;
 }
